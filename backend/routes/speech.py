@@ -10,6 +10,7 @@ from omnivoice import OmniVoiceGenerationConfig
 
 from model_manager import get_model
 from routes.tts import _audio_to_wav_bytes, _build_kwargs, _generate_chunked, _free_cuda_cache, CHUNK_CHARS
+from voice_store import list_voices as list_saved_voices, load_voice
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["openai-compat"])
@@ -47,10 +48,15 @@ async def openai_speech(request: Request):
     if response_format not in ("wav", "pcm"):
         raise HTTPException(400, "Only response_format='wav' is currently supported")
     speed = float(data.get("speed") or 1.0)
+    voice = data.get("voice")
     language = data.get("language")
     instruct = data.get("instruct")
     guidance_scale = float(data.get("guidance_scale") or 2.0)
     ref_text = data.get("ref_text")
+
+    if model.startswith("voice:"):
+        voice = model.split(":", 1)[1]
+        model = "tts-1-hd"
 
     num_step = MODEL_STEPS.get(model, DEFAULT_STEPS)
     omni = get_model()
@@ -90,6 +96,22 @@ async def openai_speech(request: Request):
                 )
             except Exception as e:
                 raise HTTPException(400, f"Failed to create voice clone prompt: {e}")
+        elif voice and str(voice).strip() and str(voice).strip() not in ("alloy", "echo", "fable", "onyx", "nova", "shimmer"):
+            voice_id = str(voice).strip()
+            saved_voice = load_voice(voice_id)
+            if saved_voice is None:
+                raise HTTPException(404, f"Voice '{voice_id}' not found")
+            ref_audio_path = saved_voice.get("ref_audio_path")
+            if not ref_audio_path:
+                raise HTTPException(400, f"Voice '{voice_id}' has no reference audio")
+            try:
+                kw["voice_clone_prompt"] = omni.create_voice_clone_prompt(
+                    ref_audio=ref_audio_path,
+                    ref_text=ref_text or saved_voice.get("ref_text"),
+                )
+                logger.info("[openai] using saved voice %s", voice_id)
+            except Exception as e:
+                raise HTTPException(400, f"Failed to load voice '{voice_id}': {e}")
 
         if instruct and str(instruct).strip():
             kw["instruct"] = str(instruct).strip()
@@ -112,10 +134,19 @@ async def openai_speech(request: Request):
 
 @router.get("/models")
 def list_models():
+    voice_models = [
+        {
+            "id": f"voice:{voice['id']}",
+            "object": "model",
+            "description": f"OmniVoice saved voice: {voice.get('name', voice['id'])}",
+        }
+        for voice in list_saved_voices()
+        if voice.get("has_audio")
+    ]
     return {
         "object": "list",
         "data": [
             {"id": "tts-1", "object": "model", "description": "OmniVoice fast (16 steps)"},
             {"id": "tts-1-hd", "object": "model", "description": "OmniVoice quality (32 steps)"},
-        ],
+        ] + voice_models,
     }
