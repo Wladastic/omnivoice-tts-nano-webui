@@ -5,6 +5,10 @@ The main goal of this project is to make OmniVoice practical on machines with
 limited VRAM by keeping model loading, quantization, chunking, and cleanup
 configurable.
 
+This repo is a WebUI/API wrapper and VRAM-efficiency setup around the original
+OmniVoice model by k2-fsa:
+[k2-fsa/OmniVoice on Hugging Face](https://huggingface.co/k2-fsa/OmniVoice).
+
 I have tested multiple TTS Models and though the "best" in terms of efficiency might be kokoro-tts, but it does not support German for example.
 And I first tested many others, chatterbox, qwen3tts, piper, xttsv2, vibevoice...
 But in the end omnivoice has really thrown me off the chair.
