@@ -85,7 +85,7 @@ def _stt_word_segments(audio_path: str) -> list[dict]:
 
 def trim_audio(audio_path):
     if not audio_path:
-        return None
+        return None, t("err_no_audio")
     data, sr = sf.read(audio_path)
     if data.ndim > 1:
         data = data.mean(axis=1)
@@ -94,12 +94,13 @@ def trim_audio(audio_path):
     audio_len_s = len(data) / sr
     if audio_len_s <= MAX_REF_SECONDS:
         print(f"[trim] audio is {audio_len_s:.2f}s, no trim needed")
-        return audio_path
+        return audio_path, t("trim_not_needed", seconds=f"{audio_len_s:.2f}")
 
     soft_limit = MAX_REF_SECONDS  # 3.5s ideal
     hard_limit = 4.0  # absolute cap so we always stay under 4s
 
     cut_s = None
+    status = None
     segments = _stt_word_segments(audio_path)
     if segments:
         in_window = [s["end"] for s in segments
@@ -107,9 +108,11 @@ def trim_audio(audio_path):
         under = [s["end"] for s in segments if s.get("end", 0) <= soft_limit]
         if in_window:
             cut_s = in_window[-1]
+            status = t("trim_stt_cut", seconds=f"{cut_s:.2f}")
             print(f"[trim] STT cut at {cut_s:.2f}s (within {soft_limit}-{hard_limit}s window)")
         elif under:
             cut_s = under[-1]
+            status = t("trim_stt_cut", seconds=f"{cut_s:.2f}")
             print(f"[trim] STT cut at {cut_s:.2f}s (latest before soft limit)")
 
     if cut_s is None:
@@ -129,11 +132,13 @@ def trim_audio(audio_path):
                     candidates.append(end / sr)
             if candidates:
                 cut_s = candidates[-1]
+                status = t("trim_silence_cut", seconds=f"{cut_s:.2f}")
                 print(f"[trim] silence cut at {cut_s:.2f}s (top_db={top_db}, gap≥{min_gap_s*1000:.0f}ms)")
                 break
 
     if cut_s is None:
         cut_s = soft_limit
+        status = t("trim_hard_cut", seconds=f"{soft_limit:.2f}")
         print(f"[trim] no boundary found — hard cut at {soft_limit}s")
 
     cut_s = max(1.0, min(cut_s, audio_len_s))
@@ -144,7 +149,7 @@ def trim_audio(audio_path):
     fd, new_path = tempfile.mkstemp(suffix=".wav")
     os.close(fd)
     sf.write(new_path, data[:cut], sr, subtype="PCM_16")
-    return new_path
+    return new_path, status or t("trim_done", seconds=f"{cut_s:.2f}")
 
 
 def transcribe_audio(audio_path, fallback_path=None):
@@ -379,7 +384,7 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     clone_audio_out = gr.Audio(label=t("output"), type="filepath")
                     clone_status = gr.Textbox(label=t("status"), interactive=False)
 
-            clone_trim_btn.click(trim_audio, inputs=clone_ref_audio, outputs=clone_ref_trimmed)
+            clone_trim_btn.click(trim_audio, inputs=clone_ref_audio, outputs=[clone_ref_trimmed, clone_status])
             clone_transcribe_btn.click(
                 transcribe_audio,
                 inputs=[clone_ref_trimmed, clone_ref_audio],
@@ -494,7 +499,7 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     del_voice_id = gr.Textbox(label=t("delete_voice_id"))
                     del_btn = gr.Button(t("delete_voice_btn"), variant="stop")
 
-            new_voice_trim_btn.click(trim_audio, inputs=new_voice_audio, outputs=new_voice_trimmed)
+            new_voice_trim_btn.click(trim_audio, inputs=new_voice_audio, outputs=[new_voice_trimmed, manage_status])
             new_voice_transcribe_btn.click(
                 transcribe_audio,
                 inputs=[new_voice_trimmed, new_voice_audio],
