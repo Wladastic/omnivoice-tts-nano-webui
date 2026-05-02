@@ -90,7 +90,8 @@ and reduce `CHUNK_CHARS` before increasing model precision or step count.
 
 ## Optional STT
 
-STT is optional and intentionally lives in a separate project, `stt-webui`.
+STT is optional and intentionally lives in a separate project:
+[stt-nano-webui](https://github.com/Wladastic/stt-nano-webui).
 This OmniVoice repo only needs an OpenAI-compatible transcription endpoint at:
 
 ```text
@@ -108,7 +109,7 @@ STT_URL=http://localhost:8882
 
 For a service on another machine, set that URL only in your local `.env`.
 
-The companion `stt-webui` project provides:
+The companion `stt-nano-webui` project provides:
 
 - WebUI: `http://localhost:7861`
 - backend API: `http://localhost:8882`
@@ -116,9 +117,9 @@ The companion `stt-webui` project provides:
 - lightweight default model: `parakeet-onnx-int8`
 - optional `whisper-1` alias for OpenAI-compatible clients
 
-Together, `omni-webui-api` and `stt-webui` can be used as local speech services
-for tools such as OpenWebUI: this repo covers TTS/voice cloning, while
-`stt-webui` covers speech-to-text.
+Together, `omnivoice-tts-nano-webui` and `stt-nano-webui` can be used as local
+speech services for tools such as OpenWebUI: this repo covers TTS/voice cloning,
+while `stt-nano-webui` covers speech-to-text.
 
 ## Voice Design Tags
 
