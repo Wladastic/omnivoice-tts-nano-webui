@@ -1,5 +1,6 @@
 import gc
 import logging
+import os
 import time
 import threading
 from typing import Optional
@@ -7,7 +8,19 @@ from typing import Optional
 import torch
 from omnivoice import OmniVoice
 
-from config import CHECKPOINT, DEVICE, DTYPE, LM_QUANT, LOAD_ASR, MAX_VRAM_GB, MODEL_TTL_SECONDS
+from config import (
+    AUDIO_TOKENIZER_DEVICE,
+    CHECKPOINT,
+    CPU_OFFLOAD,
+    CPU_OFFLOAD_GB,
+    DEVICE,
+    DTYPE,
+    LM_QUANT,
+    LOAD_ASR,
+    MAX_VRAM_GB,
+    MODEL_TTL_SECONDS,
+    OFFLOAD_DIR,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,12 +152,56 @@ def peak_vram_gb() -> float:
 
 
 def _apply_vram_limit():
+    if CPU_OFFLOAD:
+        return
     if MAX_VRAM_GB > 0 and torch.cuda.is_available():
         total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
         fraction = MAX_VRAM_GB / total_gb
         fraction = max(0.05, min(fraction, 1.0))
         torch.cuda.set_per_process_memory_fraction(fraction)
         logger.info(f"VRAM limit: {MAX_VRAM_GB:.2f}GB ({fraction*100:.1f}% of {total_gb:.2f}GB)")
+
+
+def _load_kwargs() -> dict:
+    kwargs = dict(dtype=_dtype(), load_asr=LOAD_ASR)
+
+    if CPU_OFFLOAD:
+        os.makedirs(OFFLOAD_DIR, exist_ok=True)
+        max_memory = {"cpu": f"{CPU_OFFLOAD_GB:.0f}GiB"}
+        if torch.cuda.is_available() and MAX_VRAM_GB > 0:
+            max_memory[0] = f"{MAX_VRAM_GB:.0f}GiB"
+        kwargs.update(
+            device_map="auto",
+            max_memory=max_memory,
+            offload_folder=OFFLOAD_DIR,
+            offload_state_dict=True,
+            low_cpu_mem_usage=True,
+        )
+        logger.info(
+            "CPU offload enabled: device_map=auto max_memory=%s offload_folder=%s",
+            max_memory,
+            OFFLOAD_DIR,
+        )
+    else:
+        kwargs["device_map"] = DEVICE
+
+    return kwargs
+
+
+def _move_audio_tokenizer(model):
+    target = AUDIO_TOKENIZER_DEVICE
+    if not target:
+        return
+    if target == "cuda" and not torch.cuda.is_available():
+        logger.warning("AUDIO_TOKENIZER_DEVICE=cuda requested but CUDA is unavailable")
+        return
+    if not hasattr(model, "audio_tokenizer") or model.audio_tokenizer is None:
+        return
+    logger.info("Moving audio tokenizer to %s", target)
+    model.audio_tokenizer.to(target)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    logger.info("Audio tokenizer moved — VRAM: %s", _vram_info())
 
 
 def get_model() -> OmniVoice:
@@ -158,16 +215,23 @@ def get_model() -> OmniVoice:
 
             _model = OmniVoice.from_pretrained(
                 CHECKPOINT,
-                device_map=DEVICE,
-                dtype=_dtype(),
-                load_asr=LOAD_ASR,
+                **_load_kwargs(),
             )
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             logger.info(f"OmniVoice loaded — VRAM after load: {_vram_info()}")
+            _move_audio_tokenizer(_model)
 
-            if LM_QUANT in ("nf4", "int8"):
+            if CPU_OFFLOAD and LM_QUANT in ("nf4", "fp4", "int8"):
+                logger.warning(
+                    "CPU_OFFLOAD=true with LM_QUANT=%s keeps the quantized LLM "
+                    "layers on DEVICE. This may use more VRAM than pure CPU "
+                    "offload, but is usually much smaller than unquantized weights.",
+                    LM_QUANT,
+                )
+                _quantize_llm_in_place(_model)
+            elif LM_QUANT in ("nf4", "int8"):
                 _quantize_llm_in_place(_model)
         _last_used = time.time()
         return _model

@@ -18,6 +18,7 @@ services:
       - LOAD_ASR=false
       - MODEL_TTL_SECONDS=3600
       - CHUNK_CHARS=200
+      - CHUNK_GAP_MS=${CHUNK_GAP_MS:-150}
       - MAX_VRAM_GB=4  # 0 = no limit. If exceeded during inference, request will OOM.
     deploy:
       resources:

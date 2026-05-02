@@ -1,5 +1,8 @@
 # OmniVoice Low-VRAM WebUI API
 
+*NEW*: Added a mixed CPU/GPU offload compose profile for very tight VRAM budgets!
+This enables running with less than 1.5GB of GPU VRAM, by offloading around 2-3GB to the CPU Ram, while remaining high speeds!
+
 Docker Compose setup for running an OmniVoice backend with a Gradio WebUI.
 The main goal of this project is to make OmniVoice practical on machines with
 limited VRAM by keeping model loading, quantization, chunking, and cleanup
@@ -83,6 +86,10 @@ Common variables:
 - `DTYPE`: `float16` or `bfloat16`
 - `LM_QUANT`: `none`, `nf4`, or `int8`
 - `MAX_VRAM_GB`: GPU memory guard, `0` disables the limit
+- `CPU_OFFLOAD`: experimental Accelerate CPU offload mode
+- `CPU_OFFLOAD_GB`: CPU RAM budget for offloaded model weights
+- `OFFLOAD_DIR`: folder used by Accelerate for offload state
+- `AUDIO_TOKENIZER_DEVICE`: optional `cpu` or `cuda` override for OmniVoice's audio tokenizer
 - `CHUNK_CHARS`: split long text into smaller generation chunks
 - `MODEL_TTL_SECONDS`: unload idle backend model state after this many seconds
 
@@ -107,6 +114,32 @@ and reduce `CHUNK_CHARS` before increasing model precision or step count.
 `float16` is the recommended GPU dtype. `bfloat16` can fail in OmniVoice post
 processing because parts of the upstream model convert tensors to NumPy, which
 does not support PyTorch `BFloat16` tensors directly.
+
+### Experimental CPU Offload
+
+For very tight VRAM budgets, set:
+
+```env
+CPU_OFFLOAD=true
+MAX_VRAM_GB=3
+CPU_OFFLOAD_GB=8
+AUDIO_TOKENIZER_DEVICE=cpu
+```
+
+or use the dedicated mixed CPU/GPU offload compose profile:
+
+```bash
+./start-mixed-offload.sh -d
+```
+
+This uses Hugging Face Accelerate with `device_map="auto"` and `max_memory`,
+similar in spirit to layer offload. It can reduce resident GPU memory, but it is
+slower. The mixed-offload compose profile still uses `LM_QUANT=nf4`, because
+unquantized weights are usually worse for this project than pure CPU offload.
+
+The mixed-offload compose profile also defaults `AUDIO_TOKENIZER_DEVICE=cpu`.
+That may matter more than LLM offload for OmniVoice because the upstream loader
+creates the audio tokenizer separately after loading the main model.
 
 ## Optional STT
 
