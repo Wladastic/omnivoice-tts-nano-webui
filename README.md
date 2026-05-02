@@ -5,6 +5,17 @@ The main goal of this project is to make OmniVoice practical on machines with
 limited VRAM by keeping model loading, quantization, chunking, and cleanup
 configurable.
 
+I have tested multiple TTS Models and though the "best" in terms of efficiency might be kokoro-tts, but it does not support German for example.
+And I first tested many others, chatterbox, qwen3tts, piper, xttsv2, vibevoice...
+But in the end omnivoice has really thrown me off the chair.
+Generated Voice in good enough quality and 5s of voice generated in just 0.6s on a RTX 5060Ti and 0.2s on my RTX 4080.
+
+I did some, or a lot, of tweaking to squeeze it as much as I could.
+It defaults the backbone Qwen3 0.6B Model to use nf4 quants, could be done better, but good enough.
+
+HINT: I set the maximum VRAM to 3GB, it works for me, but if you use a sample voice that is longer than 3.5s, it will not be enough!
+
+
 It supports:
 
 - voice cloning from short reference audio
