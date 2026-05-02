@@ -17,7 +17,8 @@ Generated Voice in good enough quality and 5s of voice generated in just 0.6s on
 I did some, or a lot, of tweaking to squeeze it as much as I could.
 It defaults the backbone Qwen3 0.6B Model to use nf4 quants, could be done better, but good enough.
 
-HINT: I set the maximum VRAM to 3GB, it works for me, but if you use a sample voice that is longer than 3.5s, it will not be enough!
+HINT: I set the maximum VRAM to 3GB, it works for me, but if you use a sample voice that is longer than 3.5s, it will not be enough! *edit* default is 4GB now as I ran into OOMs.
+I will try to bring it down further while running stable.
 
 
 It supports:
@@ -102,6 +103,10 @@ possible:
 
 For the lowest memory footprint, start with the GPU defaults in `.env-example`
 and reduce `CHUNK_CHARS` before increasing model precision or step count.
+
+`float16` is the recommended GPU dtype. `bfloat16` can fail in OmniVoice post
+processing because parts of the upstream model convert tensors to NumPy, which
+does not support PyTorch `BFloat16` tensors directly.
 
 ## Optional STT
 
