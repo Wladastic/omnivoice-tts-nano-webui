@@ -4,7 +4,7 @@ import os
 import tempfile
 from typing import Optional
 
-from fastapi import APIRouter, Form, HTTPException, UploadFile, File
+from fastapi import APIRouter, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from omnivoice import OmniVoiceGenerationConfig
 
@@ -23,19 +23,35 @@ DEFAULT_STEPS = 16
 
 
 @router.post("/audio/speech")
-def openai_speech(
-    model: str = Form("tts-1-hd"),
-    input: str = Form(...),
-    voice: Optional[str] = Form(None),
-    response_format: str = Form("wav"),
-    speed: float = Form(1.0),
-    # extra params
-    language: Optional[str] = Form(None),
-    instruct: Optional[str] = Form(None),
-    guidance_scale: float = Form(2.0),
-    ref_audio: Optional[UploadFile] = File(None),
-    ref_text: Optional[str] = Form(None),
-):
+async def openai_speech(request: Request):
+    content_type = request.headers.get("content-type", "")
+    ref_audio: Optional[UploadFile] = None
+
+    if "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+        form = await request.form()
+        data = dict(form)
+        uploaded = data.get("ref_audio")
+        if isinstance(uploaded, UploadFile) or hasattr(uploaded, "read"):
+            ref_audio = uploaded
+    else:
+        try:
+            data = await request.json()
+        except Exception:
+            raise HTTPException(400, "Expected JSON or form data body")
+
+    model = str(data.get("model") or "tts-1-hd")
+    input = str(data.get("input") or "").strip()
+    if not input:
+        raise HTTPException(422, "Field 'input' is required")
+    response_format = str(data.get("response_format") or "wav")
+    if response_format not in ("wav", "pcm"):
+        raise HTTPException(400, "Only response_format='wav' is currently supported")
+    speed = float(data.get("speed") or 1.0)
+    language = data.get("language")
+    instruct = data.get("instruct")
+    guidance_scale = float(data.get("guidance_scale") or 2.0)
+    ref_text = data.get("ref_text")
+
     num_step = MODEL_STEPS.get(model, DEFAULT_STEPS)
     omni = get_model()
 
@@ -75,8 +91,8 @@ def openai_speech(
             except Exception as e:
                 raise HTTPException(400, f"Failed to create voice clone prompt: {e}")
 
-        if instruct and instruct.strip():
-            kw["instruct"] = instruct.strip()
+        if instruct and str(instruct).strip():
+            kw["instruct"] = str(instruct).strip()
 
         try:
             audio, n_chunks = _generate_chunked(omni, kw, input.strip(), CHUNK_CHARS)
