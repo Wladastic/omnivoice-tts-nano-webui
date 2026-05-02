@@ -1,0 +1,45 @@
+services:
+  omnivoice-backend:
+    build: ./backend
+    container_name: omnivoice-backend
+    restart: unless-stopped
+    ports:
+      - "8883:8883"
+    volumes:
+      - ./voices:/app/voices
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - huggingface_cache:/root/.cache/huggingface
+    environment:
+      - OMNIVOICE_MODEL=k2-fsa/OmniVoice
+      - DEVICE=cuda
+      - DTYPE=bfloat16
+      - LM_QUANT=nf4  # none, nf4, or int8 — try nf4 to drop ~800MB VRAM
+      - LOAD_ASR=false
+      - MODEL_TTL_SECONDS=3600
+      - CHUNK_CHARS=200
+      - MAX_VRAM_GB=3  # 0 = no limit. If exceeded during inference, request will OOM.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  omnivoice-frontend:
+    build: ./frontend
+    container_name: omnivoice-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-7863}:${FRONTEND_PORT:-7863}"
+    environment:
+      - API_URL=http://omnivoice-backend:8883
+      - STT_URL=${STT_URL:-}
+      - FRONTEND_PORT=${FRONTEND_PORT:-7863}
+      - UI_LANG=${UI_LANG:-en}
+    depends_on:
+      - omnivoice-backend
+
+volumes:
+  huggingface_cache:
