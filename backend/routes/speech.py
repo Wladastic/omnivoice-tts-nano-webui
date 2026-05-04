@@ -44,6 +44,20 @@ def _truthy(value) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _float_value(data: dict, key: str, default: float) -> float:
+    value = data.get(key)
+    if value is None or value == "":
+        return default
+    return float(value)
+
+
+def _int_value(data: dict, key: str, default: int) -> int:
+    value = data.get(key)
+    if value is None or value == "":
+        return default
+    return int(value)
+
+
 def _audio_to_pcm_bytes(audio: np.ndarray) -> bytes:
     waveform = np.clip(audio, -1.0, 1.0)
     return (waveform * 32767).astype(np.int16).tobytes()
@@ -180,7 +194,7 @@ async def openai_speech(request: Request):
         voice = model.split(":", 1)[1]
         model = "tts-1-hd"
 
-    num_step = MODEL_STEPS.get(model, DEFAULT_STEPS)
+    num_step = _int_value(data, "num_step", MODEL_STEPS.get(model, DEFAULT_STEPS))
     logger.info(
         "[openai] request model=%r voice=%r response_format=%r stream=%s text_len=%d",
         model,
@@ -197,19 +211,19 @@ async def openai_speech(request: Request):
     req.text = input
     req.language = language
     req.speed = speed
-    req.duration = 0.0
+    req.duration = _float_value(data, "duration", 0.0)
     req.num_step = num_step
     req.guidance_scale = guidance_scale
-    req.denoise = True
-    req.preprocess_prompt = True
-    req.postprocess_output = True
+    req.denoise = _truthy(data.get("denoise", True))
+    req.preprocess_prompt = _truthy(data.get("preprocess_prompt", True))
+    req.postprocess_output = _truthy(data.get("postprocess_output", True))
 
     gen_config = OmniVoiceGenerationConfig(
         num_step=num_step,
         guidance_scale=guidance_scale,
-        denoise=True,
-        preprocess_prompt=True,
-        postprocess_output=True,
+        denoise=req.denoise,
+        preprocess_prompt=req.preprocess_prompt,
+        postprocess_output=req.postprocess_output,
     )
     kw = _build_kwargs(req, gen_config)
 

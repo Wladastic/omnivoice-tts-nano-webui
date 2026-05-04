@@ -12,6 +12,7 @@ from i18n import t
 API_URL = os.environ.get("API_URL", "http://localhost:8883")
 STT_URL = os.environ.get("STT_URL", "").strip().rstrip("/")
 FRONTEND_PORT = int(os.environ.get("FRONTEND_PORT", "7861"))
+STREAM_CHUNK_SIZE = int(os.environ.get("STREAM_CHUNK_SIZE", "65536"))
 
 LANGUAGES = [
     "Auto", "English", "German", "French", "Spanish", "Italian", "Portuguese",
@@ -44,6 +45,10 @@ def _status_from_response(r) -> str:
     return f"{t('done')} ({', '.join(extras)})" if extras else t("done")
 
 
+def set_audio_autoplay(enabled):
+    return gr.update(autoplay=bool(enabled))
+
+
 def _post_wav(endpoint: str, payload: dict) -> tuple:
     try:
         r = httpx.post(f"{API_URL}{endpoint}", json=payload, timeout=120)
@@ -53,6 +58,83 @@ def _post_wav(endpoint: str, payload: dict) -> tuple:
         return None, f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
     except Exception as e:
         return None, f"{t('error_prefix')}: {e}"
+
+
+def _stream_status(total_bytes: int) -> str:
+    return f"{t('streaming')} ({total_bytes // 1024} KiB)"
+
+
+def _speech_stream_fields(
+    text, language, instruct,
+    num_step, guidance_scale, denoise, speed, duration,
+    preprocess_prompt, postprocess_output,
+):
+    fields = {
+        "model": "tts-1-hd",
+        "input": text,
+        "response_format": "wav",
+        "stream": "true",
+        "num_step": str(int(num_step)),
+        "guidance_scale": str(float(guidance_scale)),
+        "denoise": str(bool(denoise)).lower(),
+        "speed": str(float(speed)),
+        "duration": str(float(duration)),
+        "preprocess_prompt": str(bool(preprocess_prompt)).lower(),
+        "postprocess_output": str(bool(postprocess_output)).lower(),
+    }
+    if language and language != "Auto":
+        fields["language"] = language
+    if instruct:
+        fields["instruct"] = instruct
+    return fields
+
+
+def _stream_speech_json(payload: dict):
+    yield gr.skip(), t("streaming")
+    total_bytes = 0
+    try:
+        with httpx.stream(
+            "POST",
+            f"{API_URL}/v1/audio/speech",
+            json=payload,
+            timeout=None,
+        ) as r:
+            r.raise_for_status()
+            for chunk in r.iter_bytes(chunk_size=STREAM_CHUNK_SIZE):
+                if not chunk:
+                    continue
+                total_bytes += len(chunk)
+                yield chunk, _stream_status(total_bytes)
+        yield gr.skip(), t("done")
+    except httpx.HTTPStatusError as e:
+        yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
+    except Exception as e:
+        yield gr.skip(), f"{t('error_prefix')}: {e}"
+
+
+def _stream_speech_multipart(fields: dict, ref_audio: str):
+    yield gr.skip(), t("streaming")
+    total_bytes = 0
+    try:
+        with open(ref_audio, "rb") as f:
+            with httpx.stream(
+                "POST",
+                f"{API_URL}/v1/audio/speech",
+                data=fields,
+                files={"ref_audio": ("ref.wav", f, "audio/wav")},
+                timeout=None,
+            ) as r:
+                r.raise_for_status()
+                for chunk in r.iter_bytes(chunk_size=STREAM_CHUNK_SIZE):
+                    if not chunk:
+                        continue
+                    total_bytes += len(chunk)
+                    yield chunk, _stream_status(total_bytes)
+        yield gr.skip(), t("done")
+    except httpx.HTTPStatusError as e:
+        yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
+    except Exception as e:
+        yield gr.skip(), f"{t('error_prefix')}: {e}"
 
 
 def _stt_word_segments(audio_path: str) -> list[dict]:
@@ -181,42 +263,21 @@ def generate_clone(
     preprocess_prompt, postprocess_output,
 ):
     if not text or not text.strip():
-        return None, t("err_text_empty")
+        yield gr.skip(), t("err_text_empty")
+        return
     ref_audio = ref_trimmed or ref_audio
     if not ref_audio:
-        return None, t("err_no_ref_audio")
+        yield gr.skip(), t("err_no_ref_audio")
+        return
 
-    try:
-        fields = {
-            "text": text,
-            "num_step": str(int(num_step)),
-            "guidance_scale": str(float(guidance_scale)),
-            "denoise": str(denoise).lower(),
-            "speed": str(float(speed)),
-            "duration": str(float(duration)),
-            "preprocess_prompt": str(preprocess_prompt).lower(),
-            "postprocess_output": str(postprocess_output).lower(),
-        }
-        if language and language != "Auto":
-            fields["language"] = language
-        if ref_text:
-            fields["ref_text"] = ref_text
-        if instruct:
-            fields["instruct"] = instruct
-
-        with open(ref_audio, "rb") as f:
-            r = httpx.post(
-                f"{API_URL}/tts/clone",
-                data=fields,
-                files={"ref_audio": ("ref.wav", f, "audio/wav")},
-                timeout=120,
-            )
-        r.raise_for_status()
-        return _save_response_wav(r.content), _status_from_response(r)
-    except httpx.HTTPStatusError as e:
-        return None, f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
-    except Exception as e:
-        return None, f"{t('error_prefix')}: {e}"
+    fields = _speech_stream_fields(
+        text, language, instruct,
+        num_step, guidance_scale, denoise, speed, duration,
+        preprocess_prompt, postprocess_output,
+    )
+    if ref_text:
+        fields["ref_text"] = ref_text
+    yield from _stream_speech_multipart(fields, ref_audio)
 
 
 def generate_design(
@@ -225,23 +286,18 @@ def generate_design(
     preprocess_prompt, postprocess_output,
 ):
     if not text or not text.strip():
-        return None, t("err_text_empty")
+        yield gr.skip(), t("err_text_empty")
+        return
     if not instruct or not instruct.strip():
-        return None, t("err_no_instruct")
+        yield gr.skip(), t("err_no_instruct")
+        return
 
-    payload = dict(
-        text=text,
-        language=language if language != "Auto" else None,
-        instruct=instruct,
-        num_step=int(num_step),
-        guidance_scale=float(guidance_scale),
-        denoise=bool(denoise),
-        speed=float(speed),
-        duration=float(duration),
-        preprocess_prompt=bool(preprocess_prompt),
-        postprocess_output=bool(postprocess_output),
+    payload = _speech_stream_fields(
+        text, language, instruct,
+        num_step, guidance_scale, denoise, speed, duration,
+        preprocess_prompt, postprocess_output,
     )
-    return _post_wav("/tts/design", payload)
+    yield from _stream_speech_json(payload)
 
 
 def generate_voice(
@@ -249,25 +305,20 @@ def generate_voice(
     num_step, guidance_scale, denoise, speed, duration,
     preprocess_prompt, postprocess_output,
 ):
-    if not voice_id:
-        return None, t("err_no_voice_selected")
+    if not voice_id or voice_id == "none":
+        yield gr.skip(), t("err_no_voice_selected")
+        return
     if not text or not text.strip():
-        return None, t("err_text_empty")
+        yield gr.skip(), t("err_text_empty")
+        return
 
-    payload = dict(
-        text=text,
-        voice_id=voice_id,
-        language=language if language != "Auto" else None,
-        instruct=instruct or None,
-        num_step=int(num_step),
-        guidance_scale=float(guidance_scale),
-        denoise=bool(denoise),
-        speed=float(speed),
-        duration=float(duration),
-        preprocess_prompt=bool(preprocess_prompt),
-        postprocess_output=bool(postprocess_output),
+    payload = _speech_stream_fields(
+        text, language, instruct,
+        num_step, guidance_scale, denoise, speed, duration,
+        preprocess_prompt, postprocess_output,
     )
-    return _post_wav(f"/tts/voice/{voice_id}", payload)
+    payload["voice"] = voice_id
+    yield from _stream_speech_json(payload)
 
 
 def list_voices():
@@ -379,12 +430,19 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                         clone_postprocess = gr.Checkbox(value=True, label=t("postprocess_output"))
                     clone_speed = gr.Slider(0.1, 3.0, value=1.0, step=0.05, label=t("speed"))
                     clone_duration = gr.Number(value=0.0, label=t("duration"))
+                    clone_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
                     clone_btn = gr.Button(t("synthesize"), variant="primary")
                 with gr.Column():
-                    clone_audio_out = gr.Audio(label=t("output"), type="filepath")
+                    clone_audio_out = gr.Audio(
+                        label=t("output"),
+                        streaming=True,
+                        autoplay=True,
+                        format="wav",
+                    )
                     clone_status = gr.Textbox(label=t("status"), interactive=False)
 
             clone_trim_btn.click(trim_audio, inputs=clone_ref_audio, outputs=[clone_ref_trimmed, clone_status])
+            clone_autoplay.change(set_audio_autoplay, inputs=clone_autoplay, outputs=clone_audio_out)
             clone_transcribe_btn.click(
                 transcribe_audio,
                 inputs=[clone_ref_trimmed, clone_ref_audio],
@@ -421,11 +479,18 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                         design_postprocess = gr.Checkbox(value=True, label=t("postprocess_output"))
                     design_speed = gr.Slider(0.1, 3.0, value=1.0, step=0.05, label=t("speed"))
                     design_duration = gr.Number(value=0.0, label=t("duration"))
+                    design_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
                     design_btn = gr.Button(t("synthesize"), variant="primary")
                 with gr.Column():
-                    design_audio_out = gr.Audio(label=t("output"), type="filepath")
+                    design_audio_out = gr.Audio(
+                        label=t("output"),
+                        streaming=True,
+                        autoplay=True,
+                        format="wav",
+                    )
                     design_status = gr.Textbox(label=t("status"), interactive=False)
 
+            design_autoplay.change(set_audio_autoplay, inputs=design_autoplay, outputs=design_audio_out)
             design_btn.click(
                 generate_design,
                 inputs=[
@@ -459,12 +524,19 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                         voice_postprocess = gr.Checkbox(value=True, label=t("postprocess_output"))
                     voice_speed = gr.Slider(0.1, 3.0, value=1.0, step=0.05, label=t("speed"))
                     voice_duration = gr.Number(value=0.0, label=t("duration"))
+                    voice_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
                     voice_btn = gr.Button(t("synthesize"), variant="primary")
                 with gr.Column():
-                    voice_audio_out = gr.Audio(label=t("output"), type="filepath")
+                    voice_audio_out = gr.Audio(
+                        label=t("output"),
+                        streaming=True,
+                        autoplay=True,
+                        format="wav",
+                    )
                     voice_status = gr.Textbox(label=t("status"), interactive=False)
 
             voices_refresh_btn.click(list_voices, outputs=voice_dropdown)
+            voice_autoplay.change(set_audio_autoplay, inputs=voice_autoplay, outputs=voice_audio_out)
             voice_btn.click(
                 generate_voice,
                 inputs=[
