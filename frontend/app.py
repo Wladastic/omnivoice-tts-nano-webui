@@ -13,6 +13,7 @@ API_URL = os.environ.get("API_URL", "http://localhost:8883")
 STT_URL = os.environ.get("STT_URL", "").strip().rstrip("/")
 FRONTEND_PORT = int(os.environ.get("FRONTEND_PORT", "7861"))
 STREAM_CHUNK_SIZE = int(os.environ.get("STREAM_CHUNK_SIZE", "65536"))
+STREAM_SAMPLE_RATE = int(os.environ.get("STREAM_SAMPLE_RATE", "24000"))
 
 LANGUAGES = [
     "Auto", "English", "German", "French", "Spanish", "Italian", "Portuguese",
@@ -72,7 +73,7 @@ def _speech_stream_fields(
     fields = {
         "model": "tts-1-hd",
         "input": text,
-        "response_format": "wav",
+        "response_format": "pcm",
         "stream": "true",
         "num_step": str(int(num_step)),
         "guidance_scale": str(float(guidance_scale)),
@@ -92,6 +93,7 @@ def _speech_stream_fields(
 def _stream_speech_json(payload: dict):
     yield gr.skip(), t("streaming")
     total_bytes = 0
+    remainder = b""
     try:
         with httpx.stream(
             "POST",
@@ -104,7 +106,12 @@ def _stream_speech_json(payload: dict):
                 if not chunk:
                     continue
                 total_bytes += len(chunk)
-                yield chunk, _stream_status(total_bytes)
+                chunk = remainder + chunk
+                even_len = len(chunk) - (len(chunk) % 2)
+                remainder = chunk[even_len:]
+                samples = np.frombuffer(chunk[:even_len], dtype="<i2")
+                if samples.size:
+                    yield (STREAM_SAMPLE_RATE, samples), _stream_status(total_bytes)
         yield gr.skip(), t("done")
     except httpx.HTTPStatusError as e:
         yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
@@ -115,6 +122,7 @@ def _stream_speech_json(payload: dict):
 def _stream_speech_multipart(fields: dict, ref_audio: str):
     yield gr.skip(), t("streaming")
     total_bytes = 0
+    remainder = b""
     try:
         with open(ref_audio, "rb") as f:
             with httpx.stream(
@@ -129,7 +137,12 @@ def _stream_speech_multipart(fields: dict, ref_audio: str):
                     if not chunk:
                         continue
                     total_bytes += len(chunk)
-                    yield chunk, _stream_status(total_bytes)
+                    chunk = remainder + chunk
+                    even_len = len(chunk) - (len(chunk) % 2)
+                    remainder = chunk[even_len:]
+                    samples = np.frombuffer(chunk[:even_len], dtype="<i2")
+                    if samples.size:
+                        yield (STREAM_SAMPLE_RATE, samples), _stream_status(total_bytes)
         yield gr.skip(), t("done")
     except httpx.HTTPStatusError as e:
         yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
