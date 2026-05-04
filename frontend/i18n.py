@@ -22,6 +22,7 @@ TRANSLATIONS = {
         "tab_design": "Voice Design",
         "tab_voices": "Saved Voices",
         "tab_manage": "Manage Voices",
+        "tab_create_voice": "Create Voice",
         # Common
         "text": "Text",
         "text_placeholder": "Text to synthesize…",
@@ -113,6 +114,7 @@ TRANSLATIONS = {
         "tab_design": "Stimmen-Design",
         "tab_voices": "Gespeicherte Stimmen",
         "tab_manage": "Stimmen verwalten",
+        "tab_create_voice": "Stimme erstellen",
         "text": "Text",
         "text_placeholder": "Zu synthetisierender Text…",
         "language": "Sprache",

@@ -10,6 +10,8 @@ import soundfile as sf
 from config import SAMPLING_RATE
 from config import VOICES_DIR
 
+REF_TRAILING_SILENCE_SECONDS = float(os.environ.get("REF_TRAILING_SILENCE_SECONDS", "0.15"))
+
 
 def _voice_dir(voice_id: str) -> Path:
     return VOICES_DIR / voice_id
@@ -83,6 +85,9 @@ def save_voice_audio(voice_id: str, src_path: str) -> bool:
     dst = d / "ref.wav"
     try:
         audio, _ = librosa.load(src_path, sr=SAMPLING_RATE, mono=True)
+        trailing = int(SAMPLING_RATE * REF_TRAILING_SILENCE_SECONDS)
+        if trailing > 0:
+            audio = librosa.util.fix_length(audio, size=len(audio) + trailing)
         sf.write(dst, audio, SAMPLING_RATE, subtype="PCM_24", format="WAV")
     except Exception:
         shutil.copyfile(src_path, dst)

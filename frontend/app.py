@@ -22,6 +22,7 @@ LANGUAGES = [
 ]
 
 MAX_REF_SECONDS = 3.5
+TRIM_TRAILING_SILENCE_SECONDS = 0.15
 
 
 def _save_response_wav(response_bytes: bytes) -> str:
@@ -292,9 +293,9 @@ def trim_audio(audio_path):
                 break
 
     if cut_s is None:
-        cut_s = soft_limit
-        status = t("trim_hard_cut", seconds=f"{soft_limit:.2f}")
-        print(f"[trim] no boundary found — hard cut at {soft_limit}s")
+        cut_s = hard_limit
+        status = t("trim_hard_cut", seconds=f"{hard_limit:.2f}")
+        print(f"[trim] no boundary found — hard cut at {hard_limit}s")
 
     cut_s = max(1.0, min(cut_s, audio_len_s))
     cut = int(cut_s * sr)
@@ -303,7 +304,8 @@ def trim_audio(audio_path):
 
     fd, new_path = tempfile.mkstemp(suffix=".wav")
     os.close(fd)
-    sf.write(new_path, data[:cut], sr, subtype="PCM_16")
+    trailing = np.zeros(int(sr * TRIM_TRAILING_SILENCE_SECONDS), dtype=np.float32)
+    sf.write(new_path, np.concatenate([data[:cut], trailing]), sr, subtype="PCM_16")
     return new_path, status or t("trim_done", seconds=f"{cut_s:.2f}")
 
 
@@ -769,8 +771,8 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                 outputs=voice_status,
             )
 
-        # --- Manage Voices tab ---
-        with gr.Tab(t("tab_manage"), id="manage", render_children=True):
+        # --- Create Voice tab ---
+        with gr.Tab(t("tab_create_voice"), id="create", render_children=True):
             with gr.Row():
                 with gr.Column():
                     gr.Markdown(t("create_voice_header"))
@@ -788,7 +790,25 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     new_voice_transcribe_btn = gr.Button(t("transcribe"), size="sm")
                     create_btn = gr.Button(t("create_voice_btn"), variant="primary")
                 with gr.Column():
-                    manage_status = gr.Textbox(label=t("status"), interactive=False)
+                    create_status = gr.Textbox(label=t("status"), interactive=False)
+
+            new_voice_trim_btn.click(trim_audio, inputs=new_voice_audio, outputs=[new_voice_trimmed, create_status])
+            new_voice_transcribe_btn.click(
+                transcribe_audio,
+                inputs=[new_voice_trimmed, new_voice_audio],
+                outputs=new_voice_ref_text,
+            )
+
+            create_btn.click(
+                create_voice,
+                inputs=[new_voice_id, new_voice_name, new_voice_ref_text, new_voice_desc, new_voice_audio, new_voice_trimmed],
+                outputs=create_status,
+            )
+
+        # --- Manage Voices tab ---
+        with gr.Tab(t("tab_manage"), id="manage", render_children=True):
+            with gr.Row():
+                with gr.Column():
                     gr.Markdown(t("edit_voice_header"))
                     edit_voice_dropdown = gr.Dropdown(label=t("voice"), interactive=True)
                     with gr.Row():
@@ -806,22 +826,12 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     edit_voice_trimmed = gr.Audio(label=t("trimmed"), type="filepath")
                     edit_voice_transcribe_btn = gr.Button(t("transcribe"), size="sm")
                     edit_save_btn = gr.Button(t("save_voice_btn"), variant="primary")
+                with gr.Column():
+                    manage_status = gr.Textbox(label=t("status"), interactive=False)
                     gr.Markdown(t("delete_voice_header"))
                     del_voice_id = gr.Textbox(label=t("delete_voice_id"))
                     del_btn = gr.Button(t("delete_voice_btn"), variant="stop")
 
-            new_voice_trim_btn.click(trim_audio, inputs=new_voice_audio, outputs=[new_voice_trimmed, manage_status])
-            new_voice_transcribe_btn.click(
-                transcribe_audio,
-                inputs=[new_voice_trimmed, new_voice_audio],
-                outputs=new_voice_ref_text,
-            )
-
-            create_btn.click(
-                create_voice,
-                inputs=[new_voice_id, new_voice_name, new_voice_ref_text, new_voice_desc, new_voice_audio, new_voice_trimmed],
-                outputs=manage_status,
-            )
             edit_refresh_btn.click(list_voices, outputs=edit_voice_dropdown)
             demo.load(list_voices, outputs=edit_voice_dropdown)
             edit_load_btn.click(
