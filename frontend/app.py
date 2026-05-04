@@ -69,6 +69,7 @@ def _speech_stream_fields(
     text, language, instruct,
     num_step, guidance_scale, denoise, speed, duration,
     preprocess_prompt, postprocess_output,
+    speaker_embedding_only=False,
 ):
     fields = {
         "model": "tts-1-hd",
@@ -87,6 +88,8 @@ def _speech_stream_fields(
         fields["language"] = language
     if instruct:
         fields["instruct"] = instruct
+    if speaker_embedding_only:
+        fields["x_vector_only_mode"] = "true"
     return fields
 
 
@@ -94,6 +97,7 @@ def _stream_speech_json(payload: dict):
     yield gr.skip(), t("streaming")
     total_bytes = 0
     remainder = b""
+    parts = []
     try:
         with httpx.stream(
             "POST",
@@ -111,8 +115,12 @@ def _stream_speech_json(payload: dict):
                 remainder = chunk[even_len:]
                 samples = np.frombuffer(chunk[:even_len], dtype="<i2")
                 if samples.size:
+                    parts.append(samples.copy())
                     yield (STREAM_SAMPLE_RATE, samples), _stream_status(total_bytes)
-        yield gr.skip(), t("done")
+        if parts:
+            yield (STREAM_SAMPLE_RATE, np.concatenate(parts)), t("done")
+        else:
+            yield gr.skip(), t("done")
     except httpx.HTTPStatusError as e:
         yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
     except Exception as e:
@@ -123,6 +131,7 @@ def _stream_speech_multipart(fields: dict, ref_audio: str):
     yield gr.skip(), t("streaming")
     total_bytes = 0
     remainder = b""
+    parts = []
     try:
         with open(ref_audio, "rb") as f:
             with httpx.stream(
@@ -142,8 +151,12 @@ def _stream_speech_multipart(fields: dict, ref_audio: str):
                     remainder = chunk[even_len:]
                     samples = np.frombuffer(chunk[:even_len], dtype="<i2")
                     if samples.size:
+                        parts.append(samples.copy())
                         yield (STREAM_SAMPLE_RATE, samples), _stream_status(total_bytes)
-        yield gr.skip(), t("done")
+        if parts:
+            yield (STREAM_SAMPLE_RATE, np.concatenate(parts)), t("done")
+        else:
+            yield gr.skip(), t("done")
     except httpx.HTTPStatusError as e:
         yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
     except Exception as e:
@@ -273,7 +286,7 @@ def transcribe_audio(audio_path, fallback_path=None):
 def generate_clone(
     text, language, ref_audio, ref_trimmed, ref_text, instruct,
     num_step, guidance_scale, denoise, speed, duration,
-    preprocess_prompt, postprocess_output,
+    preprocess_prompt, postprocess_output, speaker_embedding_only,
 ):
     if not text or not text.strip():
         yield gr.skip(), t("err_text_empty")
@@ -286,7 +299,7 @@ def generate_clone(
     fields = _speech_stream_fields(
         text, language, instruct,
         num_step, guidance_scale, denoise, speed, duration,
-        preprocess_prompt, postprocess_output,
+        preprocess_prompt, postprocess_output, speaker_embedding_only,
     )
     if ref_text:
         fields["ref_text"] = ref_text
@@ -316,7 +329,7 @@ def generate_design(
 def generate_voice(
     voice_id, text, language, instruct,
     num_step, guidance_scale, denoise, speed, duration,
-    preprocess_prompt, postprocess_output,
+    preprocess_prompt, postprocess_output, speaker_embedding_only,
 ):
     if not voice_id or voice_id == "none":
         yield gr.skip(), t("err_no_voice_selected")
@@ -328,7 +341,7 @@ def generate_voice(
     payload = _speech_stream_fields(
         text, language, instruct,
         num_step, guidance_scale, denoise, speed, duration,
-        preprocess_prompt, postprocess_output,
+        preprocess_prompt, postprocess_output, speaker_embedding_only,
     )
     payload["voice"] = voice_id
     yield from _stream_speech_json(payload)
@@ -441,6 +454,10 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                         clone_denoise = gr.Checkbox(value=True, label=t("denoise"))
                         clone_preprocess = gr.Checkbox(value=True, label=t("preprocess_prompt"))
                         clone_postprocess = gr.Checkbox(value=True, label=t("postprocess_output"))
+                        clone_speaker_embedding_only = gr.Checkbox(
+                            value=True,
+                            label=t("speaker_embedding_only"),
+                        )
                     clone_speed = gr.Slider(0.1, 3.0, value=1.0, step=0.05, label=t("speed"))
                     clone_duration = gr.Number(value=0.0, label=t("duration"))
                     clone_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
@@ -467,7 +484,7 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                 inputs=[
                     clone_text, clone_lang, clone_ref_audio, clone_ref_trimmed, clone_ref_text, clone_instruct,
                     clone_num_step, clone_guidance, clone_denoise, clone_speed, clone_duration,
-                    clone_preprocess, clone_postprocess,
+                    clone_preprocess, clone_postprocess, clone_speaker_embedding_only,
                 ],
                 outputs=[clone_audio_out, clone_status],
             )
@@ -535,6 +552,10 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                         voice_denoise = gr.Checkbox(value=True, label=t("denoise"))
                         voice_preprocess = gr.Checkbox(value=True, label=t("preprocess_prompt"))
                         voice_postprocess = gr.Checkbox(value=True, label=t("postprocess_output"))
+                        voice_speaker_embedding_only = gr.Checkbox(
+                            value=True,
+                            label=t("speaker_embedding_only"),
+                        )
                     voice_speed = gr.Slider(0.1, 3.0, value=1.0, step=0.05, label=t("speed"))
                     voice_duration = gr.Number(value=0.0, label=t("duration"))
                     voice_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
@@ -555,7 +576,7 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                 inputs=[
                     voice_dropdown, voice_text, voice_lang, voice_instruct,
                     voice_num_step, voice_guidance, voice_denoise, voice_speed, voice_duration,
-                    voice_preprocess, voice_postprocess,
+                    voice_preprocess, voice_postprocess, voice_speaker_embedding_only,
                 ],
                 outputs=[voice_audio_out, voice_status],
             )

@@ -189,6 +189,7 @@ async def openai_speech(request: Request):
     guidance_scale = float(data.get("guidance_scale") or 2.0)
     ref_text = data.get("ref_text")
     stream = _truthy(data.get("stream"))
+    x_vector_only_mode = _truthy(data.get("x_vector_only_mode"))
 
     if model.startswith("voice:"):
         voice = model.split(":", 1)[1]
@@ -237,6 +238,7 @@ async def openai_speech(request: Request):
                 kw["voice_clone_prompt"] = omni.create_voice_clone_prompt(
                     ref_audio=tmp_path,
                     ref_text=ref_text or None,
+                    x_vector_only_mode=x_vector_only_mode,
                 )
             except Exception as e:
                 raise HTTPException(400, f"Failed to create voice clone prompt: {e}")
@@ -252,6 +254,7 @@ async def openai_speech(request: Request):
                 kw["voice_clone_prompt"] = omni.create_voice_clone_prompt(
                     ref_audio=ref_audio_path,
                     ref_text=ref_text or saved_voice.get("ref_text"),
+                    x_vector_only_mode=x_vector_only_mode,
                 )
                 logger.info("[openai] using saved voice %s", voice_id)
             except Exception as e:
