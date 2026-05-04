@@ -100,26 +100,54 @@ def _normalize_instruct(instruct: str) -> str:
 _SENTENCE_RE = re.compile(r"(?<=[.!?。！？])\s+|(?<=[.!?。！？])$")
 
 
+def _split_long_text_piece(text: str, max_chars: int) -> list[str]:
+    """Split a sentence-sized piece further so every chunk respects max_chars."""
+    pieces: list[str] = []
+    current = ""
+    for word in text.split():
+        if len(word) > max_chars:
+            if current:
+                pieces.append(current)
+                current = ""
+            pieces.extend(word[i:i + max_chars] for i in range(0, len(word), max_chars))
+        elif not current:
+            current = word
+        elif len(current) + 1 + len(word) <= max_chars:
+            current = current + " " + word
+        else:
+            pieces.append(current)
+            current = word
+    if current:
+        pieces.append(current)
+    return pieces
+
+
 def _chunk_text(text: str, max_chars: int = 200) -> list[str]:
-    """Split text into sentence-bounded chunks under max_chars."""
+    """Split text into chunks that prefer sentence boundaries but enforce max_chars."""
     text = text.strip()
     if len(text) <= max_chars:
         return [text]
 
     sentences = [s.strip() for s in _SENTENCE_RE.split(text) if s.strip()]
     if not sentences:
-        return [text]
+        return _split_long_text_piece(text, max_chars)
 
     chunks: list[str] = []
     current = ""
-    for s in sentences:
-        if not current:
-            current = s
-        elif len(current) + 1 + len(s) <= max_chars:
-            current = current + " " + s
-        else:
-            chunks.append(current)
-            current = s
+    for sentence in sentences:
+        sentence_parts = (
+            [sentence]
+            if len(sentence) <= max_chars
+            else _split_long_text_piece(sentence, max_chars)
+        )
+        for s in sentence_parts:
+            if not current:
+                current = s
+            elif len(current) + 1 + len(s) <= max_chars:
+                current = current + " " + s
+            else:
+                chunks.append(current)
+                current = s
     if current:
         chunks.append(current)
     return chunks

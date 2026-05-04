@@ -17,7 +17,6 @@ from routes.tts import (
     _audio_to_wav_bytes,
     _build_kwargs,
     _chunk_text,
-    _generate_chunked,
     _free_cuda_cache,
     CHUNK_CHARS,
     CHUNK_GAP_MS,
@@ -47,6 +46,7 @@ def _truthy(value) -> bool:
 
 
 DEFAULT_CLEAN_MARKDOWN = _truthy(os.environ.get("CLEAN_MARKDOWN", "true"))
+PARAGRAPH_PAUSE_MS = int(os.environ.get("PARAGRAPH_PAUSE_MS", "200"))
 
 
 def _float_value(data: dict, key: str, default: float) -> float:
@@ -63,7 +63,7 @@ def _int_value(data: dict, key: str, default: int) -> int:
     return int(value)
 
 
-def _clean_markdown_for_tts(text: str) -> str:
+def _clean_markdown_paragraph(text: str) -> str:
     text = re.sub(r"```[\s\S]*?```", " ", text)
     text = re.sub(r"`([^`]+)`", r"\1", text)
     text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
@@ -76,6 +76,39 @@ def _clean_markdown_for_tts(text: str) -> str:
     text = re.sub(r"[*_~]{1,3}([^*_~]+)[*_~]{1,3}", r"\1", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
+
+
+def _ensure_terminal_punctuation(text: str) -> str:
+    if not text:
+        return text
+    if re.search(r"[.!?。！？…]$", text):
+        return text
+    return text + "."
+
+
+def _clean_markdown_for_tts(text: str) -> str:
+    return " ".join(_clean_markdown_paragraphs(text))
+
+
+def _clean_markdown_paragraphs(text: str) -> list[str]:
+    text = re.sub(r"\r\n?", "\n", text)
+    paragraphs = re.split(r"\n\s*\n+", text)
+    cleaned = [_clean_markdown_paragraph(p) for p in paragraphs]
+    return [_ensure_terminal_punctuation(p) for p in cleaned if p]
+
+
+def _text_chunks_for_speech(text: str, clean_markdown: bool) -> list[Optional[str]]:
+    if clean_markdown:
+        paragraphs = _clean_markdown_paragraphs(text)
+    else:
+        paragraphs = [text.strip()]
+
+    chunks: list[Optional[str]] = []
+    for paragraph in paragraphs:
+        if chunks and PARAGRAPH_PAUSE_MS > 0:
+            chunks.append(None)
+        chunks.extend(_chunk_text(paragraph, CHUNK_CHARS))
+    return chunks
 
 
 def _audio_to_pcm_bytes(audio: np.ndarray) -> bytes:
@@ -180,25 +213,42 @@ def _create_voice_clone_prompt(model, ref_audio, ref_text=None, x_vector_only_mo
 def _generate_audio_stream(
     model,
     kw_base: dict,
-    text: str,
+    chunks: list[Optional[str]],
     response_format: str,
     cleanup_path: Optional[str] = None,
 ) -> Iterator[bytes]:
-    chunks = _chunk_text(text, CHUNK_CHARS)
     gap = np.zeros(int(model.sampling_rate * CHUNK_GAP_MS / 1000), dtype=np.float32)
-    logger.info("[openai] streaming %d chunk%s", len(chunks), "" if len(chunks) == 1 else "s")
+    paragraph_pause = np.zeros(int(model.sampling_rate * PARAGRAPH_PAUSE_MS / 1000), dtype=np.float32)
+    text_chunks = [chunk for chunk in chunks if chunk is not None]
+    logger.info(
+        "[openai] streaming %d text chunk%s with %d paragraph pause%s",
+        len(text_chunks),
+        "" if len(text_chunks) == 1 else "s",
+        len(chunks) - len(text_chunks),
+        "" if len(chunks) - len(text_chunks) == 1 else "s",
+    )
 
     try:
         if response_format == "wav":
             yield _wav_stream_header(model.sampling_rate)
 
-        for i, chunk in enumerate(chunks):
-            logger.debug("[openai] stream chunk %d/%d: %r", i + 1, len(chunks), chunk[:60])
-            if i > 0 and CHUNK_GAP_MS > 0:
+        need_gap = False
+        text_i = 0
+        for chunk in chunks:
+            if chunk is None:
+                if PARAGRAPH_PAUSE_MS > 0:
+                    yield _encode_stream_chunk(paragraph_pause, model.sampling_rate, response_format)
+                need_gap = False
+                continue
+
+            text_i += 1
+            logger.debug("[openai] stream chunk %d/%d: %r", text_i, len(text_chunks), chunk)
+            if need_gap and CHUNK_GAP_MS > 0:
                 yield _encode_stream_chunk(gap, model.sampling_rate, response_format)
 
             out = model.generate(**dict(kw_base, text=chunk))
             yield _encode_stream_chunk(out[0], model.sampling_rate, response_format)
+            need_gap = True
     except Exception:
         logger.exception("OpenAI speech stream generation failed")
         raise
@@ -209,6 +259,32 @@ def _generate_audio_stream(
             except FileNotFoundError:
                 pass
         _free_cuda_cache()
+
+
+def _generate_audio_sequence(model, kw_base: dict, chunks: list[Optional[str]]) -> tuple[np.ndarray, int]:
+    gap = np.zeros(int(model.sampling_rate * CHUNK_GAP_MS / 1000), dtype=np.float32)
+    paragraph_pause = np.zeros(int(model.sampling_rate * PARAGRAPH_PAUSE_MS / 1000), dtype=np.float32)
+    parts = []
+    n_text_chunks = 0
+    need_gap = False
+
+    for chunk in chunks:
+        if chunk is None:
+            if PARAGRAPH_PAUSE_MS > 0:
+                parts.append(paragraph_pause)
+            need_gap = False
+            continue
+
+        if need_gap and CHUNK_GAP_MS > 0:
+            parts.append(gap)
+        out = model.generate(**dict(kw_base, text=chunk))
+        parts.append(out[0])
+        n_text_chunks += 1
+        need_gap = True
+
+    if not parts:
+        return np.array([], dtype=np.float32), 0
+    return np.concatenate(parts), n_text_chunks
 
 
 @router.post("/audio/speech")
@@ -248,10 +324,10 @@ async def openai_speech(request: Request):
     stream = _truthy(data.get("stream"))
     x_vector_only_mode = _truthy(data.get("x_vector_only_mode"))
     clean_markdown = _truthy(data.get("clean_markdown", DEFAULT_CLEAN_MARKDOWN))
-    if clean_markdown:
-        cleaned = _clean_markdown_for_tts(input)
-        if cleaned:
-            input = cleaned
+    text_chunks = _text_chunks_for_speech(input, clean_markdown)
+    if not any(chunk for chunk in text_chunks if chunk is not None):
+        raise HTTPException(422, "Input contains no speakable text")
+    input = " ".join(chunk for chunk in text_chunks if chunk is not None)
 
     if model.startswith("voice:"):
         voice = model.split(":", 1)[1]
@@ -331,12 +407,12 @@ async def openai_speech(request: Request):
             cleanup_path = tmp_path
             tmp_path = None
             return StreamingResponse(
-                _generate_audio_stream(omni, kw, input.strip(), response_format, cleanup_path),
+                _generate_audio_stream(omni, kw, text_chunks, response_format, cleanup_path),
                 media_type=_stream_media_type(response_format),
             )
 
         try:
-            audio, n_chunks = _generate_chunked(omni, kw, input.strip(), CHUNK_CHARS)
+            audio, n_chunks = _generate_audio_sequence(omni, kw, text_chunks)
         except Exception as e:
             logger.exception("OpenAI speech generation failed")
             raise HTTPException(500, f"Generation failed: {e}")

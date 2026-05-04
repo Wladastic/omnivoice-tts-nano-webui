@@ -14,6 +14,7 @@ STT_URL = os.environ.get("STT_URL", "").strip().rstrip("/")
 FRONTEND_PORT = int(os.environ.get("FRONTEND_PORT", "7861"))
 STREAM_CHUNK_SIZE = int(os.environ.get("STREAM_CHUNK_SIZE", "65536"))
 STREAM_SAMPLE_RATE = int(os.environ.get("STREAM_SAMPLE_RATE", "24000"))
+STREAM_START_BUFFER_SECONDS = float(os.environ.get("STREAM_START_BUFFER_SECONDS", "4.0"))
 
 LANGUAGES = [
     "Auto", "English", "German", "French", "Spanish", "Italian", "Portuguese",
@@ -68,6 +69,59 @@ def _post_wav(endpoint: str, payload: dict) -> tuple:
 
 def _stream_status(total_bytes: int) -> str:
     return f"{t('streaming')} ({total_bytes // 1024} KiB)"
+
+
+def _buffer_status(samples: int) -> str:
+    seconds = samples / STREAM_SAMPLE_RATE
+    return f"{t('buffering')} ({seconds:.1f}s)"
+
+
+def _iter_buffered_audio(samples, state):
+    if samples.size == 0:
+        return []
+
+    if not state["started"]:
+        state["buffered"].append(samples.copy())
+        state["buffered_samples"] += samples.size
+        if state["buffered_samples"] < state["start_samples"]:
+            return [(gr.skip(), _buffer_status(state["buffered_samples"]))]
+        samples = np.concatenate(state["buffered"])
+        state["buffered"] = []
+        state["started"] = True
+
+    outputs = []
+    if state["pending"] is not None:
+        outputs.append(((STREAM_SAMPLE_RATE, state["pending"]), _stream_status(state["total_bytes"])))
+    state["pending"] = samples
+    return outputs
+
+
+def _finish_buffered_audio(state):
+    outputs = []
+    if state["buffered"]:
+        samples = np.concatenate(state["buffered"])
+        state["buffered"] = []
+        state["started"] = True
+        if state["pending"] is not None:
+            outputs.append(((STREAM_SAMPLE_RATE, state["pending"]), _stream_status(state["total_bytes"])))
+        state["pending"] = samples
+    if state["pending"] is not None:
+        outputs.append(((STREAM_SAMPLE_RATE, state["pending"]), t("done")))
+    else:
+        outputs.append((gr.skip(), t("done")))
+    return outputs
+
+
+def _new_stream_buffer_state():
+    start_samples = int(STREAM_SAMPLE_RATE * STREAM_START_BUFFER_SECONDS)
+    return {
+        "started": start_samples <= 0,
+        "start_samples": start_samples,
+        "buffered": [],
+        "buffered_samples": 0,
+        "pending": None,
+        "total_bytes": 0,
+    }
 
 
 def _speech_stream_fields(
@@ -139,9 +193,8 @@ def _buffered_speech_multipart(fields: dict, ref_audio: str):
 
 def _stream_speech_json(payload: dict):
     yield gr.skip(), t("streaming")
-    total_bytes = 0
     remainder = b""
-    pending = None
+    state = _new_stream_buffer_state()
     try:
         with httpx.stream(
             "POST",
@@ -156,17 +209,15 @@ def _stream_speech_json(payload: dict):
             for chunk in r.iter_bytes(chunk_size=STREAM_CHUNK_SIZE):
                 if not chunk:
                     continue
-                total_bytes += len(chunk)
+                state["total_bytes"] += len(chunk)
                 chunk = remainder + chunk
                 even_len = len(chunk) - (len(chunk) % 2)
                 remainder = chunk[even_len:]
                 samples = np.frombuffer(chunk[:even_len], dtype="<i2")
-                if samples.size:
-                    if pending is not None:
-                        yield (STREAM_SAMPLE_RATE, pending), _stream_status(total_bytes)
-                    pending = samples
-        if pending is not None:
-            yield (STREAM_SAMPLE_RATE, pending), t("done")
+                for audio, status in _iter_buffered_audio(samples, state):
+                    yield audio, status
+        for audio, status in _finish_buffered_audio(state):
+            yield audio, status
     except httpx.HTTPStatusError as e:
         yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
     except Exception as e:
@@ -175,9 +226,8 @@ def _stream_speech_json(payload: dict):
 
 def _stream_speech_multipart(fields: dict, ref_audio: str):
     yield gr.skip(), t("streaming")
-    total_bytes = 0
     remainder = b""
-    pending = None
+    state = _new_stream_buffer_state()
     try:
         with open(ref_audio, "rb") as f:
             with httpx.stream(
@@ -194,17 +244,15 @@ def _stream_speech_multipart(fields: dict, ref_audio: str):
                 for chunk in r.iter_bytes(chunk_size=STREAM_CHUNK_SIZE):
                     if not chunk:
                         continue
-                    total_bytes += len(chunk)
+                    state["total_bytes"] += len(chunk)
                     chunk = remainder + chunk
                     even_len = len(chunk) - (len(chunk) % 2)
                     remainder = chunk[even_len:]
                     samples = np.frombuffer(chunk[:even_len], dtype="<i2")
-                    if samples.size:
-                        if pending is not None:
-                            yield (STREAM_SAMPLE_RATE, pending), _stream_status(total_bytes)
-                        pending = samples
-        if pending is not None:
-            yield (STREAM_SAMPLE_RATE, pending), t("done")
+                    for audio, status in _iter_buffered_audio(samples, state):
+                        yield audio, status
+        for audio, status in _finish_buffered_audio(state):
+            yield audio, status
     except httpx.HTTPStatusError as e:
         yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
     except Exception as e:
