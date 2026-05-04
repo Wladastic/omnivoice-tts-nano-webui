@@ -38,6 +38,7 @@ TRANSLATIONS = {
         "preprocess_prompt": "Preprocess prompt",
         "postprocess_output": "Postprocess output",
         "speaker_embedding_only": "Speaker embedding only",
+        "clean_markdown": "Clean Markdown",
         "speed": "Speed",
         "duration": "Duration (s, 0 = auto)",
         # Clone tab
@@ -119,6 +120,7 @@ TRANSLATIONS = {
         "preprocess_prompt": "Prompt vorverarbeiten",
         "postprocess_output": "Ausgabe nachbearbeiten",
         "speaker_embedding_only": "Nur Sprecher-Embedding",
+        "clean_markdown": "Markdown bereinigen",
         "speed": "Geschwindigkeit",
         "duration": "Dauer (s, 0 = automatisch)",
         "ref_audio": "Referenzaudio (3-3.5s ideal, max 4s)",

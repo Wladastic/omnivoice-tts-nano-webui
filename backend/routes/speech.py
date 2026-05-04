@@ -2,6 +2,8 @@ import io
 import logging
 import os
 import tempfile
+import inspect
+import re
 from typing import Iterator, Optional
 
 import numpy as np
@@ -44,6 +46,9 @@ def _truthy(value) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+DEFAULT_CLEAN_MARKDOWN = _truthy(os.environ.get("CLEAN_MARKDOWN", "true"))
+
+
 def _float_value(data: dict, key: str, default: float) -> float:
     value = data.get(key)
     if value is None or value == "":
@@ -56,6 +61,21 @@ def _int_value(data: dict, key: str, default: int) -> int:
     if value is None or value == "":
         return default
     return int(value)
+
+
+def _clean_markdown_for_tts(text: str) -> str:
+    text = re.sub(r"```[\s\S]*?```", " ", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s{0,3}>\s?", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*\d+[.)]\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*[-*_]{3,}\s*$", " ", text, flags=re.MULTILINE)
+    text = re.sub(r"[*_~]{1,3}([^*_~]+)[*_~]{1,3}", r"\1", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 def _audio_to_pcm_bytes(audio: np.ndarray) -> bytes:
@@ -118,6 +138,43 @@ def _encode_stream_chunk(audio: np.ndarray, sampling_rate: int, response_format:
         buf.seek(0)
         return buf.read()
     return _audio_to_pcm_bytes(audio)
+
+
+def _create_voice_clone_prompt(model, ref_audio, ref_text=None, x_vector_only_mode=False):
+    create_prompt = model.create_voice_clone_prompt
+    if x_vector_only_mode:
+        try:
+            sig = inspect.signature(create_prompt)
+        except (TypeError, ValueError):
+            sig = None
+
+        if sig is None or "x_vector_only_mode" in sig.parameters:
+            return create_prompt(
+                ref_audio=ref_audio,
+                ref_text=ref_text,
+                x_vector_only_mode=True,
+            )
+
+        prompt = create_prompt(ref_audio=ref_audio, ref_text=ref_text)
+        items = prompt if isinstance(prompt, list) else [prompt]
+        embeddings = [
+            getattr(item, "ref_spk_embedding")
+            for item in items
+            if getattr(item, "ref_spk_embedding", None) is not None
+        ]
+        if embeddings:
+            logger.warning(
+                "create_voice_clone_prompt does not expose x_vector_only_mode; "
+                "using extracted speaker embeddings only"
+            )
+            return {"ref_spk_embedding": embeddings}
+        logger.warning(
+            "create_voice_clone_prompt does not expose x_vector_only_mode and "
+            "returned no speaker embeddings; falling back to full prompt"
+        )
+        return prompt
+
+    return create_prompt(ref_audio=ref_audio, ref_text=ref_text)
 
 
 def _generate_audio_stream(
@@ -190,6 +247,11 @@ async def openai_speech(request: Request):
     ref_text = data.get("ref_text")
     stream = _truthy(data.get("stream"))
     x_vector_only_mode = _truthy(data.get("x_vector_only_mode"))
+    clean_markdown = _truthy(data.get("clean_markdown", DEFAULT_CLEAN_MARKDOWN))
+    if clean_markdown:
+        cleaned = _clean_markdown_for_tts(input)
+        if cleaned:
+            input = cleaned
 
     if model.startswith("voice:"):
         voice = model.split(":", 1)[1]
@@ -235,7 +297,8 @@ async def openai_speech(request: Request):
                 tmp.write(ref_audio.file.read())
                 tmp_path = tmp.name
             try:
-                kw["voice_clone_prompt"] = omni.create_voice_clone_prompt(
+                kw["voice_clone_prompt"] = _create_voice_clone_prompt(
+                    omni,
                     ref_audio=tmp_path,
                     ref_text=ref_text or None,
                     x_vector_only_mode=x_vector_only_mode,
@@ -251,7 +314,8 @@ async def openai_speech(request: Request):
             if not ref_audio_path:
                 raise HTTPException(400, f"Voice '{voice_id}' has no reference audio")
             try:
-                kw["voice_clone_prompt"] = omni.create_voice_clone_prompt(
+                kw["voice_clone_prompt"] = _create_voice_clone_prompt(
+                    omni,
                     ref_audio=ref_audio_path,
                     ref_text=ref_text or saved_voice.get("ref_text"),
                     x_vector_only_mode=x_vector_only_mode,

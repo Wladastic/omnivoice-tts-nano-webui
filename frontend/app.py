@@ -70,6 +70,7 @@ def _speech_stream_fields(
     num_step, guidance_scale, denoise, speed, duration,
     preprocess_prompt, postprocess_output,
     speaker_embedding_only=False,
+    clean_markdown=True,
 ):
     fields = {
         "model": "tts-1-hd",
@@ -83,6 +84,7 @@ def _speech_stream_fields(
         "duration": str(float(duration)),
         "preprocess_prompt": str(bool(preprocess_prompt)).lower(),
         "postprocess_output": str(bool(postprocess_output)).lower(),
+        "clean_markdown": str(bool(clean_markdown)).lower(),
     }
     if language and language != "Auto":
         fields["language"] = language
@@ -105,7 +107,10 @@ def _stream_speech_json(payload: dict):
             json=payload,
             timeout=None,
         ) as r:
-            r.raise_for_status()
+            if r.is_error:
+                error_text = r.read().decode("utf-8", errors="replace")
+                yield gr.skip(), f"{t('error_prefix')} {r.status_code}: {error_text}"
+                return
             for chunk in r.iter_bytes(chunk_size=STREAM_CHUNK_SIZE):
                 if not chunk:
                     continue
@@ -141,7 +146,10 @@ def _stream_speech_multipart(fields: dict, ref_audio: str):
                 files={"ref_audio": ("ref.wav", f, "audio/wav")},
                 timeout=None,
             ) as r:
-                r.raise_for_status()
+                if r.is_error:
+                    error_text = r.read().decode("utf-8", errors="replace")
+                    yield gr.skip(), f"{t('error_prefix')} {r.status_code}: {error_text}"
+                    return
                 for chunk in r.iter_bytes(chunk_size=STREAM_CHUNK_SIZE):
                     if not chunk:
                         continue
@@ -286,7 +294,7 @@ def transcribe_audio(audio_path, fallback_path=None):
 def generate_clone(
     text, language, ref_audio, ref_trimmed, ref_text, instruct,
     num_step, guidance_scale, denoise, speed, duration,
-    preprocess_prompt, postprocess_output, speaker_embedding_only,
+    preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown,
 ):
     if not text or not text.strip():
         yield gr.skip(), t("err_text_empty")
@@ -299,7 +307,7 @@ def generate_clone(
     fields = _speech_stream_fields(
         text, language, instruct,
         num_step, guidance_scale, denoise, speed, duration,
-        preprocess_prompt, postprocess_output, speaker_embedding_only,
+        preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown,
     )
     if ref_text:
         fields["ref_text"] = ref_text
@@ -309,7 +317,7 @@ def generate_clone(
 def generate_design(
     text, language, instruct,
     num_step, guidance_scale, denoise, speed, duration,
-    preprocess_prompt, postprocess_output,
+    preprocess_prompt, postprocess_output, clean_markdown,
 ):
     if not text or not text.strip():
         yield gr.skip(), t("err_text_empty")
@@ -321,7 +329,7 @@ def generate_design(
     payload = _speech_stream_fields(
         text, language, instruct,
         num_step, guidance_scale, denoise, speed, duration,
-        preprocess_prompt, postprocess_output,
+        preprocess_prompt, postprocess_output, False, clean_markdown,
     )
     yield from _stream_speech_json(payload)
 
@@ -329,7 +337,7 @@ def generate_design(
 def generate_voice(
     voice_id, text, language, instruct,
     num_step, guidance_scale, denoise, speed, duration,
-    preprocess_prompt, postprocess_output, speaker_embedding_only,
+    preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown,
 ):
     if not voice_id or voice_id == "none":
         yield gr.skip(), t("err_no_voice_selected")
@@ -341,7 +349,7 @@ def generate_voice(
     payload = _speech_stream_fields(
         text, language, instruct,
         num_step, guidance_scale, denoise, speed, duration,
-        preprocess_prompt, postprocess_output, speaker_embedding_only,
+        preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown,
     )
     payload["voice"] = voice_id
     yield from _stream_speech_json(payload)
@@ -458,6 +466,7 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                             value=True,
                             label=t("speaker_embedding_only"),
                         )
+                        clone_clean_markdown = gr.Checkbox(value=True, label=t("clean_markdown"))
                     clone_speed = gr.Slider(0.1, 3.0, value=1.0, step=0.05, label=t("speed"))
                     clone_duration = gr.Number(value=0.0, label=t("duration"))
                     clone_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
@@ -484,7 +493,7 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                 inputs=[
                     clone_text, clone_lang, clone_ref_audio, clone_ref_trimmed, clone_ref_text, clone_instruct,
                     clone_num_step, clone_guidance, clone_denoise, clone_speed, clone_duration,
-                    clone_preprocess, clone_postprocess, clone_speaker_embedding_only,
+                    clone_preprocess, clone_postprocess, clone_speaker_embedding_only, clone_clean_markdown,
                 ],
                 outputs=[clone_audio_out, clone_status],
             )
@@ -507,6 +516,7 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                         design_denoise = gr.Checkbox(value=True, label=t("denoise"))
                         design_preprocess = gr.Checkbox(value=True, label=t("preprocess_prompt"))
                         design_postprocess = gr.Checkbox(value=True, label=t("postprocess_output"))
+                        design_clean_markdown = gr.Checkbox(value=True, label=t("clean_markdown"))
                     design_speed = gr.Slider(0.1, 3.0, value=1.0, step=0.05, label=t("speed"))
                     design_duration = gr.Number(value=0.0, label=t("duration"))
                     design_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
@@ -526,7 +536,7 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                 inputs=[
                     design_text, design_lang, design_instruct,
                     design_num_step, design_guidance, design_denoise, design_speed, design_duration,
-                    design_preprocess, design_postprocess,
+                    design_preprocess, design_postprocess, design_clean_markdown,
                 ],
                 outputs=[design_audio_out, design_status],
             )
@@ -556,6 +566,7 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                             value=True,
                             label=t("speaker_embedding_only"),
                         )
+                        voice_clean_markdown = gr.Checkbox(value=True, label=t("clean_markdown"))
                     voice_speed = gr.Slider(0.1, 3.0, value=1.0, step=0.05, label=t("speed"))
                     voice_duration = gr.Number(value=0.0, label=t("duration"))
                     voice_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
@@ -576,7 +587,7 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                 inputs=[
                     voice_dropdown, voice_text, voice_lang, voice_instruct,
                     voice_num_step, voice_guidance, voice_denoise, voice_speed, voice_duration,
-                    voice_preprocess, voice_postprocess, voice_speaker_embedding_only,
+                    voice_preprocess, voice_postprocess, voice_speaker_embedding_only, voice_clean_markdown,
                 ],
                 outputs=[voice_audio_out, voice_status],
             )
