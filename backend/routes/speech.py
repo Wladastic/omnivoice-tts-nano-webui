@@ -74,6 +74,7 @@ def _clean_markdown_paragraph(text: str) -> str:
     text = re.sub(r"^\s*\d+[.)]\s+", "", text, flags=re.MULTILINE)
     text = re.sub(r"^\s*[-*_]{3,}\s*$", " ", text, flags=re.MULTILINE)
     text = re.sub(r"[*_~]{1,3}([^*_~]+)[*_~]{1,3}", r"\1", text)
+    text = text.replace(":", ".")
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 

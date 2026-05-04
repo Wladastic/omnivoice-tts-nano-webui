@@ -98,10 +98,15 @@ def _normalize_instruct(instruct: str) -> str:
 
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?。！？])\s+|(?<=[.!?。！？])$")
+MIN_CHUNK_CHARS = int(os.environ.get("MIN_CHUNK_CHARS", "50"))
 
 
-def _split_long_text_piece(text: str, max_chars: int) -> list[str]:
-    """Split a sentence-sized piece further so every chunk respects max_chars."""
+def _split_on_soft_punctuation(text: str) -> list[str]:
+    parts = re.split(r"(?<=[,;:，；：])\s+", text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _split_by_words(text: str, max_chars: int) -> list[str]:
     pieces: list[str] = []
     current = ""
     for word in text.split():
@@ -120,6 +125,86 @@ def _split_long_text_piece(text: str, max_chars: int) -> list[str]:
     if current:
         pieces.append(current)
     return pieces
+
+
+def _pack_text_pieces(pieces: list[str], max_chars: int) -> list[str]:
+    chunks: list[str] = []
+    current = ""
+    for piece in pieces:
+        if not current:
+            current = piece
+        elif len(current) + 1 + len(piece) <= max_chars:
+            current = current + " " + piece
+        else:
+            chunks.append(current)
+            current = piece
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _merge_tiny_chunks(chunks: list[str], min_chars: int, max_chars: int) -> list[str]:
+    if len(chunks) < 2:
+        return chunks
+
+    limit = max_chars + min_chars
+    merged = chunks[:]
+    i = 0
+    while i < len(merged) and len(merged) > 1:
+        if len(merged[i]) >= min_chars:
+            i += 1
+            continue
+
+        if i + 1 < len(merged) and len(merged[i]) + 1 + len(merged[i + 1]) <= limit:
+            merged[i] = merged[i] + " " + merged[i + 1]
+            del merged[i + 1]
+            continue
+
+        if i > 0 and len(merged[i - 1]) + 1 + len(merged[i]) <= limit:
+            merged[i - 1] = merged[i - 1] + " " + merged[i]
+            del merged[i]
+            i = max(0, i - 1)
+            continue
+
+        i += 1
+    return merged
+
+
+def _split_long_text_piece(text: str, max_chars: int) -> list[str]:
+    """Split a sentence-sized piece while avoiding tiny orphan chunks."""
+    soft_parts = _split_on_soft_punctuation(text)
+    if len(soft_parts) > 1:
+        pieces: list[str] = []
+        for part in soft_parts:
+            if len(part) <= max_chars:
+                pieces.append(part)
+            else:
+                pieces.extend(_split_by_words(part, max_chars))
+        chunks = _pack_text_pieces(pieces, max_chars)
+    else:
+        chunks = _split_by_words(text, max_chars)
+
+    min_chars = min(MIN_CHUNK_CHARS, max_chars)
+    return _merge_tiny_chunks(chunks, min_chars, max_chars)
+
+
+def _append_chunk(chunks: list[str], current: str, chunk: str, max_chars: int) -> str:
+    if not current:
+        return chunk
+    if len(current) + 1 + len(chunk) <= max_chars:
+        return current + " " + chunk
+    chunks.append(current)
+    return chunk
+
+
+def _finalize_chunks(chunks: list[str], current: str, max_chars: int) -> list[str]:
+    if current:
+        if chunks and len(current) < min(MIN_CHUNK_CHARS, max_chars):
+            chunks[-1] = chunks[-1] + " " + current
+        else:
+            chunks.append(current)
+    min_chars = min(MIN_CHUNK_CHARS, max_chars)
+    return _merge_tiny_chunks(chunks, min_chars, max_chars)
 
 
 def _chunk_text(text: str, max_chars: int = 200) -> list[str]:
@@ -141,16 +226,8 @@ def _chunk_text(text: str, max_chars: int = 200) -> list[str]:
             else _split_long_text_piece(sentence, max_chars)
         )
         for s in sentence_parts:
-            if not current:
-                current = s
-            elif len(current) + 1 + len(s) <= max_chars:
-                current = current + " " + s
-            else:
-                chunks.append(current)
-                current = s
-    if current:
-        chunks.append(current)
-    return chunks
+            current = _append_chunk(chunks, current, s, max_chars)
+    return _finalize_chunks(chunks, current, max_chars)
 
 
 CHUNK_GAP_MS = int(os.environ.get("CHUNK_GAP_MS", "150"))
