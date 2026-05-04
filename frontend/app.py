@@ -50,6 +50,10 @@ def set_audio_autoplay(enabled):
     return gr.update(autoplay=bool(enabled))
 
 
+def cancel_status():
+    return t("cancelled")
+
+
 def _post_wav(endpoint: str, payload: dict) -> tuple:
     try:
         r = httpx.post(f"{API_URL}{endpoint}", json=payload, timeout=120)
@@ -71,12 +75,13 @@ def _speech_stream_fields(
     preprocess_prompt, postprocess_output,
     speaker_embedding_only=False,
     clean_markdown=True,
+    stream_audio=True,
 ):
     fields = {
         "model": "tts-1-hd",
         "input": text,
         "response_format": "pcm",
-        "stream": "true",
+        "stream": str(bool(stream_audio)).lower(),
         "num_step": str(int(num_step)),
         "guidance_scale": str(float(guidance_scale)),
         "denoise": str(bool(denoise)).lower(),
@@ -95,11 +100,47 @@ def _speech_stream_fields(
     return fields
 
 
+def _pcm_bytes_to_audio(response_bytes: bytes):
+    even_len = len(response_bytes) - (len(response_bytes) % 2)
+    samples = np.frombuffer(response_bytes[:even_len], dtype="<i2")
+    return (STREAM_SAMPLE_RATE, samples.copy())
+
+
+def _buffered_speech_json(payload: dict):
+    yield gr.skip(), t("streaming")
+    try:
+        r = httpx.post(f"{API_URL}/v1/audio/speech", json=payload, timeout=None)
+        r.raise_for_status()
+        yield _pcm_bytes_to_audio(r.content), t("done")
+    except httpx.HTTPStatusError as e:
+        yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
+    except Exception as e:
+        yield gr.skip(), f"{t('error_prefix')}: {e}"
+
+
+def _buffered_speech_multipart(fields: dict, ref_audio: str):
+    yield gr.skip(), t("streaming")
+    try:
+        with open(ref_audio, "rb") as f:
+            r = httpx.post(
+                f"{API_URL}/v1/audio/speech",
+                data=fields,
+                files={"ref_audio": ("ref.wav", f, "audio/wav")},
+                timeout=None,
+            )
+        r.raise_for_status()
+        yield _pcm_bytes_to_audio(r.content), t("done")
+    except httpx.HTTPStatusError as e:
+        yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
+    except Exception as e:
+        yield gr.skip(), f"{t('error_prefix')}: {e}"
+
+
 def _stream_speech_json(payload: dict):
     yield gr.skip(), t("streaming")
     total_bytes = 0
     remainder = b""
-    parts = []
+    pending = None
     try:
         with httpx.stream(
             "POST",
@@ -120,12 +161,11 @@ def _stream_speech_json(payload: dict):
                 remainder = chunk[even_len:]
                 samples = np.frombuffer(chunk[:even_len], dtype="<i2")
                 if samples.size:
-                    parts.append(samples.copy())
-                    yield (STREAM_SAMPLE_RATE, samples), _stream_status(total_bytes)
-        if parts:
-            yield (STREAM_SAMPLE_RATE, np.concatenate(parts)), t("done")
-        else:
-            yield gr.skip(), t("done")
+                    if pending is not None:
+                        yield (STREAM_SAMPLE_RATE, pending), _stream_status(total_bytes)
+                    pending = samples
+        if pending is not None:
+            yield (STREAM_SAMPLE_RATE, pending), t("done")
     except httpx.HTTPStatusError as e:
         yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
     except Exception as e:
@@ -136,7 +176,7 @@ def _stream_speech_multipart(fields: dict, ref_audio: str):
     yield gr.skip(), t("streaming")
     total_bytes = 0
     remainder = b""
-    parts = []
+    pending = None
     try:
         with open(ref_audio, "rb") as f:
             with httpx.stream(
@@ -159,12 +199,11 @@ def _stream_speech_multipart(fields: dict, ref_audio: str):
                     remainder = chunk[even_len:]
                     samples = np.frombuffer(chunk[:even_len], dtype="<i2")
                     if samples.size:
-                        parts.append(samples.copy())
-                        yield (STREAM_SAMPLE_RATE, samples), _stream_status(total_bytes)
-        if parts:
-            yield (STREAM_SAMPLE_RATE, np.concatenate(parts)), t("done")
-        else:
-            yield gr.skip(), t("done")
+                        if pending is not None:
+                            yield (STREAM_SAMPLE_RATE, pending), _stream_status(total_bytes)
+                        pending = samples
+        if pending is not None:
+            yield (STREAM_SAMPLE_RATE, pending), t("done")
     except httpx.HTTPStatusError as e:
         yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
     except Exception as e:
@@ -294,7 +333,7 @@ def transcribe_audio(audio_path, fallback_path=None):
 def generate_clone(
     text, language, ref_audio, ref_trimmed, ref_text, instruct,
     num_step, guidance_scale, denoise, speed, duration,
-    preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown,
+    preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown, stream_audio,
 ):
     if not text or not text.strip():
         yield gr.skip(), t("err_text_empty")
@@ -307,17 +346,20 @@ def generate_clone(
     fields = _speech_stream_fields(
         text, language, instruct,
         num_step, guidance_scale, denoise, speed, duration,
-        preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown,
+        preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown, stream_audio,
     )
     if ref_text:
         fields["ref_text"] = ref_text
-    yield from _stream_speech_multipart(fields, ref_audio)
+    if stream_audio:
+        yield from _stream_speech_multipart(fields, ref_audio)
+    else:
+        yield from _buffered_speech_multipart(fields, ref_audio)
 
 
 def generate_design(
     text, language, instruct,
     num_step, guidance_scale, denoise, speed, duration,
-    preprocess_prompt, postprocess_output, clean_markdown,
+    preprocess_prompt, postprocess_output, clean_markdown, stream_audio,
 ):
     if not text or not text.strip():
         yield gr.skip(), t("err_text_empty")
@@ -329,15 +371,18 @@ def generate_design(
     payload = _speech_stream_fields(
         text, language, instruct,
         num_step, guidance_scale, denoise, speed, duration,
-        preprocess_prompt, postprocess_output, False, clean_markdown,
+        preprocess_prompt, postprocess_output, False, clean_markdown, stream_audio,
     )
-    yield from _stream_speech_json(payload)
+    if stream_audio:
+        yield from _stream_speech_json(payload)
+    else:
+        yield from _buffered_speech_json(payload)
 
 
 def generate_voice(
     voice_id, text, language, instruct,
     num_step, guidance_scale, denoise, speed, duration,
-    preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown,
+    preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown, stream_audio,
 ):
     if not voice_id or voice_id == "none":
         yield gr.skip(), t("err_no_voice_selected")
@@ -349,10 +394,13 @@ def generate_voice(
     payload = _speech_stream_fields(
         text, language, instruct,
         num_step, guidance_scale, denoise, speed, duration,
-        preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown,
+        preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown, stream_audio,
     )
     payload["voice"] = voice_id
-    yield from _stream_speech_json(payload)
+    if stream_audio:
+        yield from _stream_speech_json(payload)
+    else:
+        yield from _buffered_speech_json(payload)
 
 
 def list_voices():
@@ -367,6 +415,31 @@ def list_voices():
         return gr.update(choices=choices, value=choices[0][1] if choices else None)
     except Exception:
         return gr.update(choices=[], value=None)
+
+
+def load_voice_for_edit(voice_id):
+    if not voice_id:
+        return "", "", "", None, t("err_no_voice_selected")
+    try:
+        r = httpx.get(f"{API_URL}/voices/{voice_id}", timeout=10)
+        r.raise_for_status()
+        voice = r.json()
+        audio_path = None
+        if voice.get("has_audio"):
+            r2 = httpx.get(f"{API_URL}/voices/{voice_id}/audio", timeout=30)
+            r2.raise_for_status()
+            audio_path = _save_response_wav(r2.content)
+        return (
+            voice.get("name", ""),
+            voice.get("ref_text", ""),
+            voice.get("description", "") or "",
+            audio_path,
+            t("voice_loaded", name=voice.get("name", voice_id), id=voice_id),
+        )
+    except httpx.HTTPStatusError as e:
+        return "", "", "", None, f"{t('error_prefix')}: {e.response.text}"
+    except Exception as e:
+        return "", "", "", None, f"{t('error_prefix')}: {e}"
 
 
 def create_voice(voice_id, name, ref_text, description, ref_audio, ref_trimmed=None):
@@ -394,6 +467,39 @@ def create_voice(voice_id, name, ref_text, description, ref_audio, ref_trimmed=N
             return t("voice_audio_upload_failed", detail=r2.text)
 
     return t("voice_saved", name=name, id=voice_id)
+
+
+def update_saved_voice(voice_id, name, ref_text, description, ref_audio, ref_trimmed=None):
+    ref_audio = ref_trimmed or ref_audio
+    if not voice_id or not name or not ref_text:
+        return t("err_id_name_text")
+    try:
+        r = httpx.put(
+            f"{API_URL}/voices/{voice_id}",
+            json={"name": name, "ref_text": ref_text, "description": description or ""},
+            timeout=10,
+        )
+        r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        return f"{t('error_prefix')}: {e.response.text}"
+    except Exception as e:
+        return f"{t('error_prefix')}: {e}"
+
+    if ref_audio:
+        try:
+            with open(ref_audio, "rb") as f:
+                r2 = httpx.put(
+                    f"{API_URL}/voices/{voice_id}/audio",
+                    files={"file": ("ref.wav", f, "audio/wav")},
+                    timeout=30,
+                )
+            r2.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            return t("voice_audio_upload_failed", detail=e.response.text)
+        except Exception as e:
+            return f"{t('error_prefix')}: {e}"
+
+    return t("voice_updated", name=name, id=voice_id)
 
 
 def delete_voice(voice_id):
@@ -463,15 +569,22 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                         clone_preprocess = gr.Checkbox(value=True, label=t("preprocess_prompt"))
                         clone_postprocess = gr.Checkbox(value=True, label=t("postprocess_output"))
                         clone_speaker_embedding_only = gr.Checkbox(
-                            value=True,
+                            value=False,
                             label=t("speaker_embedding_only"),
                         )
                         clone_clean_markdown = gr.Checkbox(value=True, label=t("clean_markdown"))
                     clone_speed = gr.Slider(0.1, 3.0, value=1.0, step=0.05, label=t("speed"))
                     clone_duration = gr.Number(value=0.0, label=t("duration"))
-                    clone_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
-                    clone_btn = gr.Button(t("synthesize"), variant="primary")
+                    with gr.Row():
+                        clone_stream = gr.Checkbox(value=True, label=t("stream_audio"))
+                        clone_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
+                    with gr.Row():
+                        clone_btn = gr.Button(t("synthesize"), variant="primary")
+                        clone_cancel_btn = gr.Button(t("cancel"), variant="stop")
                 with gr.Column():
+                    with gr.Row():
+                        clone_btn_top = gr.Button(t("synthesize"), variant="primary")
+                        clone_cancel_btn_top = gr.Button(t("cancel"), variant="stop")
                     clone_audio_out = gr.Audio(
                         label=t("output"),
                         streaming=True,
@@ -488,14 +601,31 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                 outputs=clone_ref_text,
             )
 
-            clone_btn.click(
+            clone_inputs = [
+                clone_text, clone_lang, clone_ref_audio, clone_ref_trimmed, clone_ref_text, clone_instruct,
+                clone_num_step, clone_guidance, clone_denoise, clone_speed, clone_duration,
+                clone_preprocess, clone_postprocess, clone_speaker_embedding_only, clone_clean_markdown,
+                clone_stream,
+            ]
+            clone_top_event = clone_btn_top.click(
                 generate_clone,
-                inputs=[
-                    clone_text, clone_lang, clone_ref_audio, clone_ref_trimmed, clone_ref_text, clone_instruct,
-                    clone_num_step, clone_guidance, clone_denoise, clone_speed, clone_duration,
-                    clone_preprocess, clone_postprocess, clone_speaker_embedding_only, clone_clean_markdown,
-                ],
+                inputs=clone_inputs,
                 outputs=[clone_audio_out, clone_status],
+            )
+            clone_event = clone_btn.click(
+                generate_clone,
+                inputs=clone_inputs,
+                outputs=[clone_audio_out, clone_status],
+            )
+            clone_cancel_btn_top.click(
+                cancel_status,
+                cancels=[clone_top_event, clone_event],
+                outputs=clone_status,
+            )
+            clone_cancel_btn.click(
+                cancel_status,
+                cancels=[clone_top_event, clone_event],
+                outputs=clone_status,
             )
 
         # --- Voice Design tab ---
@@ -519,9 +649,16 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                         design_clean_markdown = gr.Checkbox(value=True, label=t("clean_markdown"))
                     design_speed = gr.Slider(0.1, 3.0, value=1.0, step=0.05, label=t("speed"))
                     design_duration = gr.Number(value=0.0, label=t("duration"))
-                    design_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
-                    design_btn = gr.Button(t("synthesize"), variant="primary")
+                    with gr.Row():
+                        design_stream = gr.Checkbox(value=True, label=t("stream_audio"))
+                        design_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
+                    with gr.Row():
+                        design_btn = gr.Button(t("synthesize"), variant="primary")
+                        design_cancel_btn = gr.Button(t("cancel"), variant="stop")
                 with gr.Column():
+                    with gr.Row():
+                        design_btn_top = gr.Button(t("synthesize"), variant="primary")
+                        design_cancel_btn_top = gr.Button(t("cancel"), variant="stop")
                     design_audio_out = gr.Audio(
                         label=t("output"),
                         streaming=True,
@@ -531,14 +668,30 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     design_status = gr.Textbox(label=t("status"), interactive=False)
 
             design_autoplay.change(set_audio_autoplay, inputs=design_autoplay, outputs=design_audio_out)
-            design_btn.click(
+            design_inputs = [
+                design_text, design_lang, design_instruct,
+                design_num_step, design_guidance, design_denoise, design_speed, design_duration,
+                design_preprocess, design_postprocess, design_clean_markdown, design_stream,
+            ]
+            design_top_event = design_btn_top.click(
                 generate_design,
-                inputs=[
-                    design_text, design_lang, design_instruct,
-                    design_num_step, design_guidance, design_denoise, design_speed, design_duration,
-                    design_preprocess, design_postprocess, design_clean_markdown,
-                ],
+                inputs=design_inputs,
                 outputs=[design_audio_out, design_status],
+            )
+            design_event = design_btn.click(
+                generate_design,
+                inputs=design_inputs,
+                outputs=[design_audio_out, design_status],
+            )
+            design_cancel_btn_top.click(
+                cancel_status,
+                cancels=[design_top_event, design_event],
+                outputs=design_status,
+            )
+            design_cancel_btn.click(
+                cancel_status,
+                cancels=[design_top_event, design_event],
+                outputs=design_status,
             )
 
         # --- Saved Voices tab ---
@@ -563,15 +716,22 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                         voice_preprocess = gr.Checkbox(value=True, label=t("preprocess_prompt"))
                         voice_postprocess = gr.Checkbox(value=True, label=t("postprocess_output"))
                         voice_speaker_embedding_only = gr.Checkbox(
-                            value=True,
+                            value=False,
                             label=t("speaker_embedding_only"),
                         )
                         voice_clean_markdown = gr.Checkbox(value=True, label=t("clean_markdown"))
                     voice_speed = gr.Slider(0.1, 3.0, value=1.0, step=0.05, label=t("speed"))
                     voice_duration = gr.Number(value=0.0, label=t("duration"))
-                    voice_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
-                    voice_btn = gr.Button(t("synthesize"), variant="primary")
+                    with gr.Row():
+                        voice_stream = gr.Checkbox(value=True, label=t("stream_audio"))
+                        voice_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
+                    with gr.Row():
+                        voice_btn = gr.Button(t("synthesize"), variant="primary")
+                        voice_cancel_btn = gr.Button(t("cancel"), variant="stop")
                 with gr.Column():
+                    with gr.Row():
+                        voice_btn_top = gr.Button(t("synthesize"), variant="primary")
+                        voice_cancel_btn_top = gr.Button(t("cancel"), variant="stop")
                     voice_audio_out = gr.Audio(
                         label=t("output"),
                         streaming=True,
@@ -582,21 +742,38 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
 
             voices_refresh_btn.click(list_voices, outputs=voice_dropdown)
             voice_autoplay.change(set_audio_autoplay, inputs=voice_autoplay, outputs=voice_audio_out)
-            voice_btn.click(
+            voice_inputs = [
+                voice_dropdown, voice_text, voice_lang, voice_instruct,
+                voice_num_step, voice_guidance, voice_denoise, voice_speed, voice_duration,
+                voice_preprocess, voice_postprocess, voice_speaker_embedding_only, voice_clean_markdown,
+                voice_stream,
+            ]
+            voice_top_event = voice_btn_top.click(
                 generate_voice,
-                inputs=[
-                    voice_dropdown, voice_text, voice_lang, voice_instruct,
-                    voice_num_step, voice_guidance, voice_denoise, voice_speed, voice_duration,
-                    voice_preprocess, voice_postprocess, voice_speaker_embedding_only, voice_clean_markdown,
-                ],
+                inputs=voice_inputs,
                 outputs=[voice_audio_out, voice_status],
+            )
+            voice_event = voice_btn.click(
+                generate_voice,
+                inputs=voice_inputs,
+                outputs=[voice_audio_out, voice_status],
+            )
+            voice_cancel_btn_top.click(
+                cancel_status,
+                cancels=[voice_top_event, voice_event],
+                outputs=voice_status,
+            )
+            voice_cancel_btn.click(
+                cancel_status,
+                cancels=[voice_top_event, voice_event],
+                outputs=voice_status,
             )
 
         # --- Manage Voices tab ---
         with gr.Tab(t("tab_manage"), id="manage", render_children=True):
-            gr.Markdown(t("create_voice_header"))
             with gr.Row():
                 with gr.Column():
+                    gr.Markdown(t("create_voice_header"))
                     new_voice_id = gr.Textbox(label=t("voice_id"), placeholder=t("voice_id_placeholder"))
                     new_voice_name = gr.Textbox(label=t("display_name"), placeholder=t("display_name_placeholder"))
                     new_voice_ref_text = gr.Textbox(label=t("ref_text"), lines=2)
@@ -612,6 +789,23 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     create_btn = gr.Button(t("create_voice_btn"), variant="primary")
                 with gr.Column():
                     manage_status = gr.Textbox(label=t("status"), interactive=False)
+                    gr.Markdown(t("edit_voice_header"))
+                    edit_voice_dropdown = gr.Dropdown(label=t("voice"), interactive=True)
+                    with gr.Row():
+                        edit_refresh_btn = gr.Button(t("refresh_voices"))
+                        edit_load_btn = gr.Button(t("load_voice_btn"))
+                    edit_voice_name = gr.Textbox(label=t("display_name"), placeholder=t("display_name_placeholder"))
+                    edit_voice_ref_text = gr.Textbox(label=t("ref_text"), lines=2)
+                    edit_voice_desc = gr.Textbox(label=t("description_optional"), lines=1)
+                    edit_voice_audio = gr.Audio(
+                        label=t("ref_audio"),
+                        type="filepath",
+                        sources=["upload", "microphone"],
+                    )
+                    edit_voice_trim_btn = gr.Button(t("trim_clone"), size="sm")
+                    edit_voice_trimmed = gr.Audio(label=t("trimmed"), type="filepath")
+                    edit_voice_transcribe_btn = gr.Button(t("transcribe"), size="sm")
+                    edit_save_btn = gr.Button(t("save_voice_btn"), variant="primary")
                     gr.Markdown(t("delete_voice_header"))
                     del_voice_id = gr.Textbox(label=t("delete_voice_id"))
                     del_btn = gr.Button(t("delete_voice_btn"), variant="stop")
@@ -626,6 +820,31 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
             create_btn.click(
                 create_voice,
                 inputs=[new_voice_id, new_voice_name, new_voice_ref_text, new_voice_desc, new_voice_audio, new_voice_trimmed],
+                outputs=manage_status,
+            )
+            edit_refresh_btn.click(list_voices, outputs=edit_voice_dropdown)
+            demo.load(list_voices, outputs=edit_voice_dropdown)
+            edit_load_btn.click(
+                load_voice_for_edit,
+                inputs=edit_voice_dropdown,
+                outputs=[edit_voice_name, edit_voice_ref_text, edit_voice_desc, edit_voice_audio, manage_status],
+            )
+            edit_voice_trim_btn.click(
+                trim_audio,
+                inputs=edit_voice_audio,
+                outputs=[edit_voice_trimmed, manage_status],
+            )
+            edit_voice_transcribe_btn.click(
+                transcribe_audio,
+                inputs=[edit_voice_trimmed, edit_voice_audio],
+                outputs=edit_voice_ref_text,
+            )
+            edit_save_btn.click(
+                update_saved_voice,
+                inputs=[
+                    edit_voice_dropdown, edit_voice_name, edit_voice_ref_text, edit_voice_desc,
+                    edit_voice_audio, edit_voice_trimmed,
+                ],
                 outputs=manage_status,
             )
             del_btn.click(delete_voice, inputs=del_voice_id, outputs=manage_status)

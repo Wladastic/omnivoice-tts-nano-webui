@@ -1,8 +1,13 @@
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Optional
 
+import librosa
+import soundfile as sf
+
+from config import SAMPLING_RATE
 from config import VOICES_DIR
 
 
@@ -47,10 +52,27 @@ def load_voice(voice_id: str) -> Optional[dict]:
 def create_voice(voice_id: str, name: str, ref_text: str, description: str = "") -> dict:
     d = _voice_dir(voice_id)
     d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, 0o755)
     data = {"name": name, "ref_text": ref_text, "description": description}
-    (d / "voice.json").write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    cfg = d / "voice.json"
+    cfg.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    os.chmod(cfg, 0o644)
     data["id"] = voice_id
     data["has_audio"] = False
+    return data
+
+
+def update_voice(voice_id: str, name: str, ref_text: str, description: str = "") -> Optional[dict]:
+    d = _voice_dir(voice_id)
+    if not d.exists():
+        return None
+    os.chmod(d, 0o755)
+    data = {"name": name, "ref_text": ref_text, "description": description}
+    cfg = d / "voice.json"
+    cfg.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    os.chmod(cfg, 0o644)
+    data["id"] = voice_id
+    data["has_audio"] = (d / "ref.wav").exists()
     return data
 
 
@@ -58,7 +80,13 @@ def save_voice_audio(voice_id: str, src_path: str) -> bool:
     d = _voice_dir(voice_id)
     if not d.exists():
         return False
-    shutil.copy(src_path, d / "ref.wav")
+    dst = d / "ref.wav"
+    try:
+        audio, _ = librosa.load(src_path, sr=SAMPLING_RATE, mono=True)
+        sf.write(dst, audio, SAMPLING_RATE, subtype="PCM_24", format="WAV")
+    except Exception:
+        shutil.copyfile(src_path, dst)
+    os.chmod(dst, 0o644)
     return True
 
 

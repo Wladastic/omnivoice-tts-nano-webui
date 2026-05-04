@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
 
 from schemas import VoiceCreate, VoiceInfo
-from voice_store import list_voices, load_voice, create_voice, save_voice_audio, delete_voice
+from voice_store import list_voices, load_voice, create_voice, update_voice, save_voice_audio, delete_voice
 
 router = APIRouter(prefix="/voices", tags=["voices"])
 
@@ -29,6 +29,14 @@ def post_voice(voice_id: str, body: VoiceCreate):
     if load_voice(voice_id) is not None:
         raise HTTPException(409, f"Voice '{voice_id}' already exists")
     return create_voice(voice_id, body.name, body.ref_text, body.description or "")
+
+
+@router.put("/{voice_id}", response_model=VoiceInfo)
+def put_voice(voice_id: str, body: VoiceCreate):
+    v = update_voice(voice_id, body.name, body.ref_text, body.description or "")
+    if v is None:
+        raise HTTPException(404, f"Voice '{voice_id}' not found")
+    return v
 
 
 @router.put("/{voice_id}/audio")
