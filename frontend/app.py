@@ -219,6 +219,10 @@ def _speech_stream_fields(
     speaker_embedding_only=False,
     clean_markdown=True,
     stream_audio=True,
+    dynamic_steps=False,
+    dynamic_min_steps=4,
+    dynamic_max_steps=64,
+    dynamic_desired_speed=4.0,
 ):
     fields = {
         "model": "tts-1-hd",
@@ -233,6 +237,10 @@ def _speech_stream_fields(
         "preprocess_prompt": str(bool(preprocess_prompt)).lower(),
         "postprocess_output": str(bool(postprocess_output)).lower(),
         "clean_markdown": str(bool(clean_markdown)).lower(),
+        "dynamic_steps": str(bool(dynamic_steps)).lower(),
+        "dynamic_min_steps": str(int(dynamic_min_steps)),
+        "dynamic_max_steps": str(int(dynamic_max_steps)),
+        "dynamic_desired_speed": str(float(dynamic_desired_speed)),
     }
     if language and language != "Auto":
         fields["language"] = language
@@ -480,6 +488,7 @@ def generate_clone(
     text, language, ref_audio, ref_trimmed, ref_text, instruct,
     num_step, guidance_scale, denoise, speed, duration,
     preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown, stream_audio,
+    dynamic_steps, dynamic_min_steps, dynamic_max_steps, dynamic_desired_speed,
 ):
     if not text or not text.strip():
         yield gr.skip(), t("err_text_empty"), _empty_metrics()
@@ -493,6 +502,7 @@ def generate_clone(
         text, language, instruct,
         num_step, guidance_scale, denoise, speed, duration,
         preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown, stream_audio,
+        dynamic_steps, dynamic_min_steps, dynamic_max_steps, dynamic_desired_speed,
     )
     if ref_text:
         fields["ref_text"] = ref_text
@@ -506,6 +516,7 @@ def generate_design(
     text, language, instruct,
     num_step, guidance_scale, denoise, speed, duration,
     preprocess_prompt, postprocess_output, clean_markdown, stream_audio,
+    dynamic_steps, dynamic_min_steps, dynamic_max_steps, dynamic_desired_speed,
 ):
     if not text or not text.strip():
         yield gr.skip(), t("err_text_empty"), _empty_metrics()
@@ -518,6 +529,7 @@ def generate_design(
         text, language, instruct,
         num_step, guidance_scale, denoise, speed, duration,
         preprocess_prompt, postprocess_output, False, clean_markdown, stream_audio,
+        dynamic_steps, dynamic_min_steps, dynamic_max_steps, dynamic_desired_speed,
     )
     if stream_audio:
         yield from _stream_speech_json(payload, "design")
@@ -529,6 +541,7 @@ def generate_voice(
     voice_id, text, language, instruct,
     num_step, guidance_scale, denoise, speed, duration,
     preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown, stream_audio,
+    dynamic_steps, dynamic_min_steps, dynamic_max_steps, dynamic_desired_speed,
 ):
     if not voice_id or voice_id == "none":
         yield gr.skip(), t("err_no_voice_selected"), _empty_metrics()
@@ -541,6 +554,7 @@ def generate_voice(
         text, language, instruct,
         num_step, guidance_scale, denoise, speed, duration,
         preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown, stream_audio,
+        dynamic_steps, dynamic_min_steps, dynamic_max_steps, dynamic_desired_speed,
     )
     payload["voice"] = voice_id
     output_label = f"voice-{voice_id}"
@@ -728,6 +742,11 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     clone_instruct = gr.Textbox(label=t("instruct_clone"), lines=1)
                     gr.Markdown(t("advanced_options"))
                     clone_num_step = gr.Slider(1, 200, value=32, step=1, label=t("diffusion_steps"))
+                    with gr.Row():
+                        clone_dynamic_steps = gr.Checkbox(value=False, label=t("dynamic_steps"))
+                        clone_dynamic_min_steps = gr.Slider(1, 200, value=4, step=1, label=t("dynamic_min_steps"))
+                        clone_dynamic_max_steps = gr.Slider(1, 200, value=64, step=1, label=t("dynamic_max_steps"))
+                    clone_dynamic_desired_speed = gr.Number(value=4.0, label=t("dynamic_desired_speed"))
                     clone_guidance = gr.Slider(0.1, 10.0, value=2.0, step=0.1, label=t("guidance_scale"))
                     with gr.Row():
                         clone_denoise = gr.Checkbox(value=True, label=t("denoise"))
@@ -771,7 +790,8 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                 clone_text, clone_lang, clone_ref_audio, clone_ref_trimmed, clone_ref_text, clone_instruct,
                 clone_num_step, clone_guidance, clone_denoise, clone_speed, clone_duration,
                 clone_preprocess, clone_postprocess, clone_speaker_embedding_only, clone_clean_markdown,
-                clone_stream,
+                clone_stream, clone_dynamic_steps, clone_dynamic_min_steps, clone_dynamic_max_steps,
+                clone_dynamic_desired_speed,
             ]
             clone_top_event = clone_btn_top.click(
                 generate_clone,
@@ -807,6 +827,11 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     )
                     gr.Markdown(t("advanced_options"))
                     design_num_step = gr.Slider(1, 200, value=32, step=1, label=t("diffusion_steps"))
+                    with gr.Row():
+                        design_dynamic_steps = gr.Checkbox(value=False, label=t("dynamic_steps"))
+                        design_dynamic_min_steps = gr.Slider(1, 200, value=4, step=1, label=t("dynamic_min_steps"))
+                        design_dynamic_max_steps = gr.Slider(1, 200, value=64, step=1, label=t("dynamic_max_steps"))
+                    design_dynamic_desired_speed = gr.Number(value=4.0, label=t("dynamic_desired_speed"))
                     design_guidance = gr.Slider(0.1, 10.0, value=2.0, step=0.1, label=t("guidance_scale"))
                     with gr.Row():
                         design_denoise = gr.Checkbox(value=True, label=t("denoise"))
@@ -839,6 +864,8 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                 design_text, design_lang, design_instruct,
                 design_num_step, design_guidance, design_denoise, design_speed, design_duration,
                 design_preprocess, design_postprocess, design_clean_markdown, design_stream,
+                design_dynamic_steps, design_dynamic_min_steps, design_dynamic_max_steps,
+                design_dynamic_desired_speed,
             ]
             design_top_event = design_btn_top.click(
                 generate_design,
@@ -877,6 +904,11 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     voice_instruct = gr.Textbox(label=t("instruct_optional"), lines=1)
                     gr.Markdown(t("advanced_options"))
                     voice_num_step = gr.Slider(1, 200, value=32, step=1, label=t("diffusion_steps"))
+                    with gr.Row():
+                        voice_dynamic_steps = gr.Checkbox(value=False, label=t("dynamic_steps"))
+                        voice_dynamic_min_steps = gr.Slider(1, 200, value=4, step=1, label=t("dynamic_min_steps"))
+                        voice_dynamic_max_steps = gr.Slider(1, 200, value=64, step=1, label=t("dynamic_max_steps"))
+                    voice_dynamic_desired_speed = gr.Number(value=4.0, label=t("dynamic_desired_speed"))
                     voice_guidance = gr.Slider(0.1, 10.0, value=2.0, step=0.1, label=t("guidance_scale"))
                     with gr.Row():
                         voice_denoise = gr.Checkbox(value=True, label=t("denoise"))
@@ -914,7 +946,8 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                 voice_dropdown, voice_text, voice_lang, voice_instruct,
                 voice_num_step, voice_guidance, voice_denoise, voice_speed, voice_duration,
                 voice_preprocess, voice_postprocess, voice_speaker_embedding_only, voice_clean_markdown,
-                voice_stream,
+                voice_stream, voice_dynamic_steps, voice_dynamic_min_steps, voice_dynamic_max_steps,
+                voice_dynamic_desired_speed,
             ]
             voice_top_event = voice_btn_top.click(
                 generate_voice,

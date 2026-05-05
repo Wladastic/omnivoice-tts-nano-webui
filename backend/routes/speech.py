@@ -1,8 +1,9 @@
 import io
 import logging
 import os
-import tempfile
 import inspect
+import tempfile
+import time
 import re
 from typing import Iterator, Optional
 
@@ -27,8 +28,15 @@ from voice_store import list_voices as list_saved_voices, load_voice
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["openai-compat"])
 
-# tts-1 → fast, tts-1-hd → quality
+TURBO_STEPS = int(os.environ.get("TURBO_STEPS", "4"))
+DYNAMIC_STEPS_MIN = int(os.environ.get("DYNAMIC_STEPS_MIN", "4"))
+DYNAMIC_STEPS_MAX = int(os.environ.get("DYNAMIC_STEPS_MAX", "64"))
+DYNAMIC_DESIRED_SPEED = float(os.environ.get("DYNAMIC_DESIRED_SPEED", "4.0"))
+DYNAMIC_STEP_DELTA = int(os.environ.get("DYNAMIC_STEP_DELTA", "4"))
+
+# tts-1 -> fast, tts-1-hd -> quality
 MODEL_STEPS = {
+    "turbo": TURBO_STEPS,
     "tts-1": 16,
     "tts-1-hd": 32,
     "gpt-4o-mini-tts": 32,
@@ -62,6 +70,94 @@ def _int_value(data: dict, key: str, default: int) -> int:
     if value is None or value == "":
         return default
     return int(value)
+
+
+def _clamp_int(value: int, minimum: int, maximum: int) -> int:
+    return max(minimum, min(maximum, value))
+
+
+def _dynamic_step_state(data: dict, model_name: str, base_config: OmniVoiceGenerationConfig) -> Optional[dict]:
+    dynamic_enabled = (
+        model_name == "dynamic"
+        or _truthy(data.get("dynamic_steps"))
+        or _truthy(data.get("dynamic_inference_steps"))
+    )
+    if not dynamic_enabled:
+        return None
+
+    min_steps = _int_value(data, "dynamic_min_steps", DYNAMIC_STEPS_MIN)
+    max_steps = _int_value(data, "dynamic_max_steps", DYNAMIC_STEPS_MAX)
+    min_steps = max(1, min_steps)
+    max_steps = max(1, max_steps)
+    if min_steps > max_steps:
+        min_steps, max_steps = max_steps, min_steps
+
+    desired_speed = max(0.1, _float_value(data, "dynamic_desired_speed", DYNAMIC_DESIRED_SPEED))
+    step_delta = max(1, _int_value(data, "dynamic_step_delta", DYNAMIC_STEP_DELTA))
+    current_steps = _clamp_int(_int_value(data, "dynamic_start_steps", max_steps), min_steps, max_steps)
+
+    return {
+        "base_config": base_config,
+        "current_steps": current_steps,
+        "min_steps": min_steps,
+        "max_steps": max_steps,
+        "desired_speed": desired_speed,
+        "step_delta": step_delta,
+    }
+
+
+def _config_with_steps(base_config: OmniVoiceGenerationConfig, num_step: int) -> OmniVoiceGenerationConfig:
+    return OmniVoiceGenerationConfig(
+        num_step=num_step,
+        guidance_scale=base_config.guidance_scale,
+        denoise=base_config.denoise,
+        preprocess_prompt=base_config.preprocess_prompt,
+        postprocess_output=base_config.postprocess_output,
+    )
+
+
+def _kwargs_for_chunk(kw_base: dict, chunk: str, dynamic_state: Optional[dict] = None) -> dict:
+    kw = dict(kw_base, text=chunk)
+    if dynamic_state is not None:
+        kw["generation_config"] = _config_with_steps(
+            dynamic_state["base_config"],
+            dynamic_state["current_steps"],
+        )
+    return kw
+
+
+def _update_dynamic_steps(dynamic_state: Optional[dict], audio: np.ndarray, sampling_rate: int, elapsed_s: float) -> None:
+    if dynamic_state is None or elapsed_s <= 0:
+        return
+
+    audio_s = len(audio) / sampling_rate
+    if audio_s <= 0:
+        return
+
+    generation_speed = audio_s / elapsed_s
+    old_steps = dynamic_state["current_steps"]
+    new_steps = old_steps
+    if generation_speed < dynamic_state["desired_speed"]:
+        new_steps = max(dynamic_state["min_steps"], old_steps - dynamic_state["step_delta"])
+    elif generation_speed > dynamic_state["desired_speed"] * 1.35:
+        new_steps = min(dynamic_state["max_steps"], old_steps + dynamic_state["step_delta"])
+
+    if new_steps != old_steps:
+        logger.info(
+            "[openai] dynamic steps %d -> %d (chunk %.2fx, target %.2fx)",
+            old_steps,
+            new_steps,
+            generation_speed,
+            dynamic_state["desired_speed"],
+        )
+        dynamic_state["current_steps"] = new_steps
+    else:
+        logger.debug(
+            "[openai] dynamic steps stay %d (chunk %.2fx, target %.2fx)",
+            old_steps,
+            generation_speed,
+            dynamic_state["desired_speed"],
+        )
 
 
 def _clean_markdown_paragraph(text: str) -> str:
@@ -218,6 +314,7 @@ def _generate_audio_stream(
     chunks: list[Optional[str]],
     response_format: str,
     cleanup_path: Optional[str] = None,
+    dynamic_state: Optional[dict] = None,
 ) -> Iterator[bytes]:
     gap = np.zeros(int(model.sampling_rate * CHUNK_GAP_MS / 1000), dtype=np.float32)
     paragraph_pause = np.zeros(int(model.sampling_rate * PARAGRAPH_PAUSE_MS / 1000), dtype=np.float32)
@@ -248,7 +345,9 @@ def _generate_audio_stream(
             if need_gap and CHUNK_GAP_MS > 0:
                 yield _encode_stream_chunk(gap, model.sampling_rate, response_format)
 
-            out = model.generate(**dict(kw_base, text=chunk))
+            started_at = time.monotonic()
+            out = model.generate(**_kwargs_for_chunk(kw_base, chunk, dynamic_state))
+            _update_dynamic_steps(dynamic_state, out[0], model.sampling_rate, time.monotonic() - started_at)
             yield _encode_stream_chunk(out[0], model.sampling_rate, response_format)
             need_gap = True
     except Exception:
@@ -263,7 +362,12 @@ def _generate_audio_stream(
         _free_cuda_cache()
 
 
-def _generate_audio_sequence(model, kw_base: dict, chunks: list[Optional[str]]) -> tuple[np.ndarray, int]:
+def _generate_audio_sequence(
+    model,
+    kw_base: dict,
+    chunks: list[Optional[str]],
+    dynamic_state: Optional[dict] = None,
+) -> tuple[np.ndarray, int]:
     gap = np.zeros(int(model.sampling_rate * CHUNK_GAP_MS / 1000), dtype=np.float32)
     paragraph_pause = np.zeros(int(model.sampling_rate * PARAGRAPH_PAUSE_MS / 1000), dtype=np.float32)
     parts = []
@@ -279,7 +383,9 @@ def _generate_audio_sequence(model, kw_base: dict, chunks: list[Optional[str]]) 
 
         if need_gap and CHUNK_GAP_MS > 0:
             parts.append(gap)
-        out = model.generate(**dict(kw_base, text=chunk))
+        started_at = time.monotonic()
+        out = model.generate(**_kwargs_for_chunk(kw_base, chunk, dynamic_state))
+        _update_dynamic_steps(dynamic_state, out[0], model.sampling_rate, time.monotonic() - started_at)
         parts.append(out[0])
         n_text_chunks += 1
         need_gap = True
@@ -331,18 +437,28 @@ async def openai_speech(request: Request):
         raise HTTPException(422, "Input contains no speakable text")
     input = " ".join(chunk for chunk in text_chunks if chunk is not None)
 
+    requested_model = model
     if model.startswith("voice:"):
         voice = model.split(":", 1)[1]
         model = "tts-1-hd"
 
-    num_step = _int_value(data, "num_step", MODEL_STEPS.get(model, DEFAULT_STEPS))
+    dynamic_enabled = (
+        model == "dynamic"
+        or _truthy(data.get("dynamic_steps"))
+        or _truthy(data.get("dynamic_inference_steps"))
+    )
+    if dynamic_enabled:
+        num_step = _int_value(data, "num_step", DYNAMIC_STEPS_MAX)
+    else:
+        num_step = _int_value(data, "num_step", MODEL_STEPS.get(model, DEFAULT_STEPS))
     logger.info(
-        "[openai] request model=%r voice=%r response_format=%r stream=%s text_len=%d",
-        model,
+        "[openai] request model=%r voice=%r response_format=%r stream=%s text_len=%d dynamic=%s",
+        requested_model,
         voice,
         response_format,
         stream,
         len(input),
+        dynamic_enabled,
     )
     reset_peak_vram()
     omni = get_model()
@@ -367,6 +483,17 @@ async def openai_speech(request: Request):
         preprocess_prompt=req.preprocess_prompt,
         postprocess_output=req.postprocess_output,
     )
+    dynamic_state = _dynamic_step_state(data, model, gen_config)
+    if dynamic_state is not None:
+        req.num_step = dynamic_state["current_steps"]
+        gen_config = _config_with_steps(gen_config, dynamic_state["current_steps"])
+        logger.info(
+            "[openai] dynamic steps enabled min=%d max=%d current=%d target=%.2fx",
+            dynamic_state["min_steps"],
+            dynamic_state["max_steps"],
+            dynamic_state["current_steps"],
+            dynamic_state["desired_speed"],
+        )
     kw = _build_kwargs(req, gen_config)
 
     tmp_path = None
@@ -410,12 +537,12 @@ async def openai_speech(request: Request):
             cleanup_path = tmp_path
             tmp_path = None
             return StreamingResponse(
-                _generate_audio_stream(omni, kw, text_chunks, response_format, cleanup_path),
+                _generate_audio_stream(omni, kw, text_chunks, response_format, cleanup_path, dynamic_state),
                 media_type=_stream_media_type(response_format),
             )
 
         try:
-            audio, n_chunks = _generate_audio_sequence(omni, kw, text_chunks)
+            audio, n_chunks = _generate_audio_sequence(omni, kw, text_chunks, dynamic_state)
         except Exception as e:
             logger.exception("OpenAI speech generation failed")
             raise HTTPException(500, f"Generation failed: {e}")
@@ -445,6 +572,8 @@ def list_models():
     return {
         "object": "list",
         "data": [
+            {"id": "turbo", "object": "model", "description": f"OmniVoice turbo ({TURBO_STEPS} steps)"},
+            {"id": "dynamic", "object": "model", "description": "OmniVoice adaptive inference steps"},
             {"id": "tts-1", "object": "model", "description": "OmniVoice fast (16 steps)"},
             {"id": "tts-1-hd", "object": "model", "description": "OmniVoice quality (32 steps)"},
             {"id": "gpt-4o-mini-tts", "object": "model", "description": "OmniVoice quality (32 steps)"},
