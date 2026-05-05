@@ -41,6 +41,9 @@ services:
       - STT_URL=${STT_URL:-}
       - FRONTEND_PORT=${FRONTEND_PORT:-7863}
       - UI_LANG=${UI_LANG:-en}
+      - OUTPUTS_DIR=/app/outputs
+    volumes:
+      - ./outputs:/app/outputs
     depends_on:
       - omnivoice-backend
 

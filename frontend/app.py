@@ -1,5 +1,8 @@
 import os
+import re
 import tempfile
+from datetime import datetime
+from pathlib import Path
 
 import gradio as gr
 import httpx
@@ -15,6 +18,7 @@ FRONTEND_PORT = int(os.environ.get("FRONTEND_PORT", "7861"))
 STREAM_CHUNK_SIZE = int(os.environ.get("STREAM_CHUNK_SIZE", "65536"))
 STREAM_SAMPLE_RATE = int(os.environ.get("STREAM_SAMPLE_RATE", "24000"))
 STREAM_START_BUFFER_SECONDS = float(os.environ.get("STREAM_START_BUFFER_SECONDS", "4.0"))
+OUTPUTS_DIR = Path(os.environ.get("OUTPUTS_DIR", "outputs"))
 
 LANGUAGES = [
     "Auto", "English", "German", "French", "Spanish", "Italian", "Portuguese",
@@ -24,6 +28,7 @@ LANGUAGES = [
 
 MAX_REF_SECONDS = 3.5
 TRIM_TRAILING_SILENCE_SECONDS = 0.15
+OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _save_response_wav(response_bytes: bytes) -> str:
@@ -31,6 +36,25 @@ def _save_response_wav(response_bytes: bytes) -> str:
     with os.fdopen(fd, "wb") as f:
         f.write(response_bytes)
     return path
+
+
+def _safe_output_name(value: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip().lower())
+    return value.strip("-") or "tts"
+
+
+def _save_output_audio(samples: np.ndarray, label: str) -> str:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    path = OUTPUTS_DIR / f"{timestamp}-{_safe_output_name(label)}.wav"
+    sf.write(path, samples.astype(np.int16), STREAM_SAMPLE_RATE, subtype="PCM_16", format="WAV")
+    os.chmod(path, 0o644)
+    return str(path)
+
+
+def _done_status(output_path: str | None = None) -> str:
+    if output_path:
+        return f"{t('done')} {t('saved_to', path=output_path)}"
+    return t("done")
 
 
 def _stt_url() -> str | None:
@@ -91,6 +115,7 @@ def _iter_buffered_audio(samples, state):
 
     outputs = []
     if state["pending"] is not None:
+        state["saved_parts"].append(state["pending"].copy())
         outputs.append(((STREAM_SAMPLE_RATE, state["pending"]), _stream_status(state["total_bytes"])))
     state["pending"] = samples
     return outputs
@@ -106,7 +131,9 @@ def _finish_buffered_audio(state):
             outputs.append(((STREAM_SAMPLE_RATE, state["pending"]), _stream_status(state["total_bytes"])))
         state["pending"] = samples
     if state["pending"] is not None:
-        outputs.append(((STREAM_SAMPLE_RATE, state["pending"]), t("done")))
+        state["saved_parts"].append(state["pending"].copy())
+        saved_path = _save_output_audio(np.concatenate(state["saved_parts"]), state["output_label"])
+        outputs.append(((STREAM_SAMPLE_RATE, state["pending"]), _done_status(saved_path)))
     else:
         outputs.append((gr.skip(), t("done")))
     return outputs
@@ -120,6 +147,8 @@ def _new_stream_buffer_state():
         "buffered": [],
         "buffered_samples": 0,
         "pending": None,
+        "saved_parts": [],
+        "output_label": "tts",
         "total_bytes": 0,
     }
 
@@ -161,19 +190,21 @@ def _pcm_bytes_to_audio(response_bytes: bytes):
     return (STREAM_SAMPLE_RATE, samples.copy())
 
 
-def _buffered_speech_json(payload: dict):
+def _buffered_speech_json(payload: dict, output_label: str):
     yield gr.skip(), t("streaming")
     try:
         r = httpx.post(f"{API_URL}/v1/audio/speech", json=payload, timeout=None)
         r.raise_for_status()
-        yield _pcm_bytes_to_audio(r.content), t("done")
+        audio = _pcm_bytes_to_audio(r.content)
+        saved_path = _save_output_audio(audio[1], output_label)
+        yield audio, _done_status(saved_path)
     except httpx.HTTPStatusError as e:
         yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
     except Exception as e:
         yield gr.skip(), f"{t('error_prefix')}: {e}"
 
 
-def _buffered_speech_multipart(fields: dict, ref_audio: str):
+def _buffered_speech_multipart(fields: dict, ref_audio: str, output_label: str):
     yield gr.skip(), t("streaming")
     try:
         with open(ref_audio, "rb") as f:
@@ -184,17 +215,20 @@ def _buffered_speech_multipart(fields: dict, ref_audio: str):
                 timeout=None,
             )
         r.raise_for_status()
-        yield _pcm_bytes_to_audio(r.content), t("done")
+        audio = _pcm_bytes_to_audio(r.content)
+        saved_path = _save_output_audio(audio[1], output_label)
+        yield audio, _done_status(saved_path)
     except httpx.HTTPStatusError as e:
         yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
     except Exception as e:
         yield gr.skip(), f"{t('error_prefix')}: {e}"
 
 
-def _stream_speech_json(payload: dict):
+def _stream_speech_json(payload: dict, output_label: str):
     yield gr.skip(), t("streaming")
     remainder = b""
     state = _new_stream_buffer_state()
+    state["output_label"] = output_label
     try:
         with httpx.stream(
             "POST",
@@ -224,10 +258,11 @@ def _stream_speech_json(payload: dict):
         yield gr.skip(), f"{t('error_prefix')}: {e}"
 
 
-def _stream_speech_multipart(fields: dict, ref_audio: str):
+def _stream_speech_multipart(fields: dict, ref_audio: str, output_label: str):
     yield gr.skip(), t("streaming")
     remainder = b""
     state = _new_stream_buffer_state()
+    state["output_label"] = output_label
     try:
         with open(ref_audio, "rb") as f:
             with httpx.stream(
@@ -401,9 +436,9 @@ def generate_clone(
     if ref_text:
         fields["ref_text"] = ref_text
     if stream_audio:
-        yield from _stream_speech_multipart(fields, ref_audio)
+        yield from _stream_speech_multipart(fields, ref_audio, "clone")
     else:
-        yield from _buffered_speech_multipart(fields, ref_audio)
+        yield from _buffered_speech_multipart(fields, ref_audio, "clone")
 
 
 def generate_design(
@@ -424,9 +459,9 @@ def generate_design(
         preprocess_prompt, postprocess_output, False, clean_markdown, stream_audio,
     )
     if stream_audio:
-        yield from _stream_speech_json(payload)
+        yield from _stream_speech_json(payload, "design")
     else:
-        yield from _buffered_speech_json(payload)
+        yield from _buffered_speech_json(payload, "design")
 
 
 def generate_voice(
@@ -447,10 +482,11 @@ def generate_voice(
         preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown, stream_audio,
     )
     payload["voice"] = voice_id
+    output_label = f"voice-{voice_id}"
     if stream_audio:
-        yield from _stream_speech_json(payload)
+        yield from _stream_speech_json(payload, output_label)
     else:
-        yield from _buffered_speech_json(payload)
+        yield from _buffered_speech_json(payload, output_label)
 
 
 def list_voices():
@@ -465,6 +501,24 @@ def list_voices():
         return gr.update(choices=choices, value=choices[0][1] if choices else None)
     except Exception:
         return gr.update(choices=[], value=None)
+
+
+def list_outputs():
+    try:
+        files = sorted(OUTPUTS_DIR.glob("*.wav"), key=lambda p: p.stat().st_mtime, reverse=True)
+        choices = [(p.name, str(p)) for p in files]
+        return gr.update(choices=choices, value=choices[0][1] if choices else None)
+    except Exception:
+        return gr.update(choices=[], value=None)
+
+
+def load_output(output_path):
+    if not output_path:
+        return None, t("err_no_audio")
+    path = Path(output_path)
+    if not path.exists():
+        return None, t("err_no_audio")
+    return str(path), t("loaded_output", name=path.name)
 
 
 def load_voice_for_edit(voice_id):
@@ -906,6 +960,26 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                 outputs=manage_status,
             )
             del_btn.click(delete_voice, inputs=del_voice_id, outputs=manage_status)
+
+        # --- History tab ---
+        with gr.Tab(t("tab_history"), id="history", render_children=True):
+            with gr.Row():
+                with gr.Column():
+                    history_dropdown = gr.Dropdown(label=t("output_file"), interactive=True)
+                    with gr.Row():
+                        history_refresh_btn = gr.Button(t("refresh_outputs"))
+                        history_load_btn = gr.Button(t("load_output"), variant="primary")
+                with gr.Column():
+                    history_audio = gr.Audio(label=t("output"), type="filepath")
+                    history_status = gr.Textbox(label=t("status"), interactive=False)
+
+            history_refresh_btn.click(list_outputs, outputs=history_dropdown)
+            demo.load(list_outputs, outputs=history_dropdown)
+            history_load_btn.click(
+                load_output,
+                inputs=history_dropdown,
+                outputs=[history_audio, history_status],
+            )
 
 
 if __name__ == "__main__":
