@@ -237,11 +237,12 @@ def _speech_stream_fields(
         "preprocess_prompt": str(bool(preprocess_prompt)).lower(),
         "postprocess_output": str(bool(postprocess_output)).lower(),
         "clean_markdown": str(bool(clean_markdown)).lower(),
-        "dynamic_steps": str(bool(dynamic_steps)).lower(),
-        "dynamic_min_steps": str(int(dynamic_min_steps)),
-        "dynamic_max_steps": str(int(dynamic_max_steps)),
-        "dynamic_desired_speed": str(float(dynamic_desired_speed)),
     }
+    if dynamic_steps:
+        fields["dynamic_steps"] = "true"
+        fields["dynamic_min_steps"] = str(int(dynamic_min_steps))
+        fields["dynamic_max_steps"] = str(int(dynamic_max_steps))
+        fields["dynamic_desired_speed"] = str(float(dynamic_desired_speed))
     if language and language != "Auto":
         fields["language"] = language
     if instruct:
@@ -743,7 +744,11 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     gr.Markdown(t("advanced_options"))
                     clone_num_step = gr.Slider(1, 200, value=32, step=1, label=t("diffusion_steps"))
                     with gr.Row():
-                        clone_dynamic_steps = gr.Checkbox(value=False, label=t("dynamic_steps"))
+                        clone_dynamic_steps = gr.Checkbox(
+                            value=False,
+                            label=t("dynamic_steps"),
+                            info=t("dynamic_steps_hint"),
+                        )
                         clone_dynamic_min_steps = gr.Slider(1, 200, value=4, step=1, label=t("dynamic_min_steps"))
                         clone_dynamic_max_steps = gr.Slider(1, 200, value=64, step=1, label=t("dynamic_max_steps"))
                     clone_dynamic_desired_speed = gr.Number(value=4.0, label=t("dynamic_desired_speed"))
@@ -760,15 +765,15 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     clone_speed = gr.Slider(0.1, 3.0, value=1.0, step=0.05, label=t("speed"))
                     clone_duration = gr.Number(value=0.0, label=t("duration"))
                     with gr.Row():
-                        clone_stream = gr.Checkbox(value=True, label=t("stream_audio"))
-                        clone_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
-                    with gr.Row():
                         clone_btn = gr.Button(t("synthesize"), variant="primary")
                         clone_cancel_btn = gr.Button(t("cancel"), variant="stop")
                 with gr.Column():
                     with gr.Row():
                         clone_btn_top = gr.Button(t("synthesize"), variant="primary")
                         clone_cancel_btn_top = gr.Button(t("cancel"), variant="stop")
+                    with gr.Row():
+                        clone_stream = gr.Checkbox(value=True, label=t("stream_audio"))
+                        clone_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
                     clone_audio_out = gr.Audio(
                         label=t("output"),
                         streaming=True,
@@ -828,7 +833,11 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     gr.Markdown(t("advanced_options"))
                     design_num_step = gr.Slider(1, 200, value=32, step=1, label=t("diffusion_steps"))
                     with gr.Row():
-                        design_dynamic_steps = gr.Checkbox(value=False, label=t("dynamic_steps"))
+                        design_dynamic_steps = gr.Checkbox(
+                            value=False,
+                            label=t("dynamic_steps"),
+                            info=t("dynamic_steps_hint"),
+                        )
                         design_dynamic_min_steps = gr.Slider(1, 200, value=4, step=1, label=t("dynamic_min_steps"))
                         design_dynamic_max_steps = gr.Slider(1, 200, value=64, step=1, label=t("dynamic_max_steps"))
                     design_dynamic_desired_speed = gr.Number(value=4.0, label=t("dynamic_desired_speed"))
@@ -841,15 +850,15 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     design_speed = gr.Slider(0.1, 3.0, value=1.0, step=0.05, label=t("speed"))
                     design_duration = gr.Number(value=0.0, label=t("duration"))
                     with gr.Row():
-                        design_stream = gr.Checkbox(value=True, label=t("stream_audio"))
-                        design_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
-                    with gr.Row():
                         design_btn = gr.Button(t("synthesize"), variant="primary")
                         design_cancel_btn = gr.Button(t("cancel"), variant="stop")
                 with gr.Column():
                     with gr.Row():
                         design_btn_top = gr.Button(t("synthesize"), variant="primary")
                         design_cancel_btn_top = gr.Button(t("cancel"), variant="stop")
+                    with gr.Row():
+                        design_stream = gr.Checkbox(value=True, label=t("stream_audio"))
+                        design_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
                     design_audio_out = gr.Audio(
                         label=t("output"),
                         streaming=True,
@@ -905,7 +914,11 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     gr.Markdown(t("advanced_options"))
                     voice_num_step = gr.Slider(1, 200, value=32, step=1, label=t("diffusion_steps"))
                     with gr.Row():
-                        voice_dynamic_steps = gr.Checkbox(value=False, label=t("dynamic_steps"))
+                        voice_dynamic_steps = gr.Checkbox(
+                            value=False,
+                            label=t("dynamic_steps"),
+                            info=t("dynamic_steps_hint"),
+                        )
                         voice_dynamic_min_steps = gr.Slider(1, 200, value=4, step=1, label=t("dynamic_min_steps"))
                         voice_dynamic_max_steps = gr.Slider(1, 200, value=64, step=1, label=t("dynamic_max_steps"))
                     voice_dynamic_desired_speed = gr.Number(value=4.0, label=t("dynamic_desired_speed"))
@@ -922,15 +935,15 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     voice_speed = gr.Slider(0.1, 3.0, value=1.0, step=0.05, label=t("speed"))
                     voice_duration = gr.Number(value=0.0, label=t("duration"))
                     with gr.Row():
-                        voice_stream = gr.Checkbox(value=True, label=t("stream_audio"))
-                        voice_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
-                    with gr.Row():
                         voice_btn = gr.Button(t("synthesize"), variant="primary")
                         voice_cancel_btn = gr.Button(t("cancel"), variant="stop")
                 with gr.Column():
                     with gr.Row():
                         voice_btn_top = gr.Button(t("synthesize"), variant="primary")
                         voice_cancel_btn_top = gr.Button(t("cancel"), variant="stop")
+                    with gr.Row():
+                        voice_stream = gr.Checkbox(value=True, label=t("stream_audio"))
+                        voice_autoplay = gr.Checkbox(value=True, label=t("autoplay"))
                     voice_audio_out = gr.Audio(
                         label=t("output"),
                         streaming=True,
