@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from model_manager import is_loaded, get_model
+from model_manager import is_loaded, get_model, peak_vram_gb
 from config import CHECKPOINT, DEVICE, DTYPE, SAMPLING_RATE
 
 router = APIRouter(prefix="/models", tags=["models"])
@@ -26,4 +26,8 @@ def load_model():
 
 @router.get("/status")
 def model_status():
-    return {"loaded": is_loaded(), "checkpoint": CHECKPOINT}
+    return {
+        "loaded": is_loaded(),
+        "checkpoint": CHECKPOINT,
+        "peak_vram_gb": peak_vram_gb(),
+    }

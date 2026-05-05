@@ -13,6 +13,7 @@ from omnivoice import OmniVoiceGenerationConfig
 from pydub import AudioSegment
 
 from model_manager import get_model
+from model_manager import reset_peak_vram
 from routes.tts import (
     _audio_to_wav_bytes,
     _build_kwargs,
@@ -343,6 +344,7 @@ async def openai_speech(request: Request):
         stream,
         len(input),
     )
+    reset_peak_vram()
     omni = get_model()
 
     class _Req:

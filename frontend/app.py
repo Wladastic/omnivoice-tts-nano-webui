@@ -1,6 +1,7 @@
 import os
 import re
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -95,6 +96,43 @@ def _stream_status(total_bytes: int) -> str:
     return f"{t('streaming')} ({total_bytes // 1024} KiB)"
 
 
+def _empty_metrics():
+    return ""
+
+
+def _current_peak_vram() -> float | None:
+    try:
+        r = httpx.get(f"{API_URL}/models/status", timeout=5)
+        r.raise_for_status()
+        value = r.json().get("peak_vram_gb")
+        return float(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def _metrics_html(generated_samples: int, started_at: float, peak_vram: float | None = None) -> str:
+    elapsed = max(0.001, time.monotonic() - started_at)
+    generated_s = generated_samples / STREAM_SAMPLE_RATE
+    ratio = generated_s / elapsed
+    if ratio >= 1.25:
+        color = "#16a34a"
+        label = "faster than playback"
+    elif ratio >= 0.90:
+        color = "#ca8a04"
+        label = "near realtime"
+    else:
+        color = "#6b7280"
+        label = "behind playback"
+    peak = f" · peak {peak_vram:.2f}GB VRAM" if peak_vram is not None else ""
+    return (
+        "<div style='font-family: system-ui, sans-serif; font-size: 0.92rem;'>"
+        f"<span style='display:inline-block;width:0.75rem;height:0.75rem;border-radius:999px;background:{color};margin-right:0.45rem;'></span>"
+        f"<strong>{ratio:.2f}x</strong> {label}"
+        f" · audio {generated_s:.1f}s · elapsed {elapsed:.1f}s{peak}"
+        "</div>"
+    )
+
+
 def _buffer_status(samples: int) -> str:
     seconds = samples / STREAM_SAMPLE_RATE
     return f"{t('buffering')} ({seconds:.1f}s)"
@@ -104,11 +142,17 @@ def _iter_buffered_audio(samples, state):
     if samples.size == 0:
         return []
 
+    state["generated_samples"] += samples.size
+
     if not state["started"]:
         state["buffered"].append(samples.copy())
         state["buffered_samples"] += samples.size
         if state["buffered_samples"] < state["start_samples"]:
-            return [(gr.skip(), _buffer_status(state["buffered_samples"]))]
+            return [(
+                gr.skip(),
+                _buffer_status(state["buffered_samples"]),
+                _metrics_html(state["generated_samples"], state["started_at"]),
+            )]
         samples = np.concatenate(state["buffered"])
         state["buffered"] = []
         state["started"] = True
@@ -116,7 +160,11 @@ def _iter_buffered_audio(samples, state):
     outputs = []
     if state["pending"] is not None:
         state["saved_parts"].append(state["pending"].copy())
-        outputs.append(((STREAM_SAMPLE_RATE, state["pending"]), _stream_status(state["total_bytes"])))
+        outputs.append((
+            (STREAM_SAMPLE_RATE, state["pending"]),
+            _stream_status(state["total_bytes"]),
+            _metrics_html(state["generated_samples"], state["started_at"]),
+        ))
     state["pending"] = samples
     return outputs
 
@@ -128,14 +176,23 @@ def _finish_buffered_audio(state):
         state["buffered"] = []
         state["started"] = True
         if state["pending"] is not None:
-            outputs.append(((STREAM_SAMPLE_RATE, state["pending"]), _stream_status(state["total_bytes"])))
+            outputs.append((
+                (STREAM_SAMPLE_RATE, state["pending"]),
+                _stream_status(state["total_bytes"]),
+                _metrics_html(state["generated_samples"], state["started_at"]),
+            ))
         state["pending"] = samples
     if state["pending"] is not None:
         state["saved_parts"].append(state["pending"].copy())
         saved_path = _save_output_audio(np.concatenate(state["saved_parts"]), state["output_label"])
-        outputs.append(((STREAM_SAMPLE_RATE, state["pending"]), _done_status(saved_path)))
+        peak_vram = _current_peak_vram()
+        outputs.append((
+            (STREAM_SAMPLE_RATE, state["pending"]),
+            _done_status(saved_path),
+            _metrics_html(state["generated_samples"], state["started_at"], peak_vram),
+        ))
     else:
-        outputs.append((gr.skip(), t("done")))
+        outputs.append((gr.skip(), t("done"), _empty_metrics()))
     return outputs
 
 
@@ -149,6 +206,8 @@ def _new_stream_buffer_state():
         "pending": None,
         "saved_parts": [],
         "output_label": "tts",
+        "generated_samples": 0,
+        "started_at": time.monotonic(),
         "total_bytes": 0,
     }
 
@@ -191,21 +250,23 @@ def _pcm_bytes_to_audio(response_bytes: bytes):
 
 
 def _buffered_speech_json(payload: dict, output_label: str):
-    yield gr.skip(), t("streaming")
+    started_at = time.monotonic()
+    yield gr.skip(), t("streaming"), _empty_metrics()
     try:
         r = httpx.post(f"{API_URL}/v1/audio/speech", json=payload, timeout=None)
         r.raise_for_status()
         audio = _pcm_bytes_to_audio(r.content)
         saved_path = _save_output_audio(audio[1], output_label)
-        yield audio, _done_status(saved_path)
+        yield audio, _done_status(saved_path), _metrics_html(len(audio[1]), started_at, _current_peak_vram())
     except httpx.HTTPStatusError as e:
-        yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
+        yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}", _empty_metrics()
     except Exception as e:
-        yield gr.skip(), f"{t('error_prefix')}: {e}"
+        yield gr.skip(), f"{t('error_prefix')}: {e}", _empty_metrics()
 
 
 def _buffered_speech_multipart(fields: dict, ref_audio: str, output_label: str):
-    yield gr.skip(), t("streaming")
+    started_at = time.monotonic()
+    yield gr.skip(), t("streaming"), _empty_metrics()
     try:
         with open(ref_audio, "rb") as f:
             r = httpx.post(
@@ -217,15 +278,15 @@ def _buffered_speech_multipart(fields: dict, ref_audio: str, output_label: str):
         r.raise_for_status()
         audio = _pcm_bytes_to_audio(r.content)
         saved_path = _save_output_audio(audio[1], output_label)
-        yield audio, _done_status(saved_path)
+        yield audio, _done_status(saved_path), _metrics_html(len(audio[1]), started_at, _current_peak_vram())
     except httpx.HTTPStatusError as e:
-        yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
+        yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}", _empty_metrics()
     except Exception as e:
-        yield gr.skip(), f"{t('error_prefix')}: {e}"
+        yield gr.skip(), f"{t('error_prefix')}: {e}", _empty_metrics()
 
 
 def _stream_speech_json(payload: dict, output_label: str):
-    yield gr.skip(), t("streaming")
+    yield gr.skip(), t("streaming"), _empty_metrics()
     remainder = b""
     state = _new_stream_buffer_state()
     state["output_label"] = output_label
@@ -238,7 +299,7 @@ def _stream_speech_json(payload: dict, output_label: str):
         ) as r:
             if r.is_error:
                 error_text = r.read().decode("utf-8", errors="replace")
-                yield gr.skip(), f"{t('error_prefix')} {r.status_code}: {error_text}"
+                yield gr.skip(), f"{t('error_prefix')} {r.status_code}: {error_text}", _empty_metrics()
                 return
             for chunk in r.iter_bytes(chunk_size=STREAM_CHUNK_SIZE):
                 if not chunk:
@@ -248,18 +309,18 @@ def _stream_speech_json(payload: dict, output_label: str):
                 even_len = len(chunk) - (len(chunk) % 2)
                 remainder = chunk[even_len:]
                 samples = np.frombuffer(chunk[:even_len], dtype="<i2")
-                for audio, status in _iter_buffered_audio(samples, state):
-                    yield audio, status
-        for audio, status in _finish_buffered_audio(state):
-            yield audio, status
+                for audio, status, metrics in _iter_buffered_audio(samples, state):
+                    yield audio, status, metrics
+        for audio, status, metrics in _finish_buffered_audio(state):
+            yield audio, status, metrics
     except httpx.HTTPStatusError as e:
-        yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
+        yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}", _empty_metrics()
     except Exception as e:
-        yield gr.skip(), f"{t('error_prefix')}: {e}"
+        yield gr.skip(), f"{t('error_prefix')}: {e}", _empty_metrics()
 
 
 def _stream_speech_multipart(fields: dict, ref_audio: str, output_label: str):
-    yield gr.skip(), t("streaming")
+    yield gr.skip(), t("streaming"), _empty_metrics()
     remainder = b""
     state = _new_stream_buffer_state()
     state["output_label"] = output_label
@@ -274,7 +335,7 @@ def _stream_speech_multipart(fields: dict, ref_audio: str, output_label: str):
             ) as r:
                 if r.is_error:
                     error_text = r.read().decode("utf-8", errors="replace")
-                    yield gr.skip(), f"{t('error_prefix')} {r.status_code}: {error_text}"
+                    yield gr.skip(), f"{t('error_prefix')} {r.status_code}: {error_text}", _empty_metrics()
                     return
                 for chunk in r.iter_bytes(chunk_size=STREAM_CHUNK_SIZE):
                     if not chunk:
@@ -284,14 +345,14 @@ def _stream_speech_multipart(fields: dict, ref_audio: str, output_label: str):
                     even_len = len(chunk) - (len(chunk) % 2)
                     remainder = chunk[even_len:]
                     samples = np.frombuffer(chunk[:even_len], dtype="<i2")
-                    for audio, status in _iter_buffered_audio(samples, state):
-                        yield audio, status
-        for audio, status in _finish_buffered_audio(state):
-            yield audio, status
+                    for audio, status, metrics in _iter_buffered_audio(samples, state):
+                        yield audio, status, metrics
+        for audio, status, metrics in _finish_buffered_audio(state):
+            yield audio, status, metrics
     except httpx.HTTPStatusError as e:
-        yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}"
+        yield gr.skip(), f"{t('error_prefix')} {e.response.status_code}: {e.response.text}", _empty_metrics()
     except Exception as e:
-        yield gr.skip(), f"{t('error_prefix')}: {e}"
+        yield gr.skip(), f"{t('error_prefix')}: {e}", _empty_metrics()
 
 
 def _stt_word_segments(audio_path: str) -> list[dict]:
@@ -421,11 +482,11 @@ def generate_clone(
     preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown, stream_audio,
 ):
     if not text or not text.strip():
-        yield gr.skip(), t("err_text_empty")
+        yield gr.skip(), t("err_text_empty"), _empty_metrics()
         return
     ref_audio = ref_trimmed or ref_audio
     if not ref_audio:
-        yield gr.skip(), t("err_no_ref_audio")
+        yield gr.skip(), t("err_no_ref_audio"), _empty_metrics()
         return
 
     fields = _speech_stream_fields(
@@ -447,10 +508,10 @@ def generate_design(
     preprocess_prompt, postprocess_output, clean_markdown, stream_audio,
 ):
     if not text or not text.strip():
-        yield gr.skip(), t("err_text_empty")
+        yield gr.skip(), t("err_text_empty"), _empty_metrics()
         return
     if not instruct or not instruct.strip():
-        yield gr.skip(), t("err_no_instruct")
+        yield gr.skip(), t("err_no_instruct"), _empty_metrics()
         return
 
     payload = _speech_stream_fields(
@@ -470,10 +531,10 @@ def generate_voice(
     preprocess_prompt, postprocess_output, speaker_embedding_only, clean_markdown, stream_audio,
 ):
     if not voice_id or voice_id == "none":
-        yield gr.skip(), t("err_no_voice_selected")
+        yield gr.skip(), t("err_no_voice_selected"), _empty_metrics()
         return
     if not text or not text.strip():
-        yield gr.skip(), t("err_text_empty")
+        yield gr.skip(), t("err_text_empty"), _empty_metrics()
         return
 
     payload = _speech_stream_fields(
@@ -696,6 +757,7 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                         format="wav",
                     )
                     clone_status = gr.Textbox(label=t("status"), interactive=False)
+                    clone_metrics = gr.HTML(label=t("metrics"))
 
             clone_trim_btn.click(trim_audio, inputs=clone_ref_audio, outputs=[clone_ref_trimmed, clone_status])
             clone_autoplay.change(set_audio_autoplay, inputs=clone_autoplay, outputs=clone_audio_out)
@@ -714,12 +776,12 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
             clone_top_event = clone_btn_top.click(
                 generate_clone,
                 inputs=clone_inputs,
-                outputs=[clone_audio_out, clone_status],
+                outputs=[clone_audio_out, clone_status, clone_metrics],
             )
             clone_event = clone_btn.click(
                 generate_clone,
                 inputs=clone_inputs,
-                outputs=[clone_audio_out, clone_status],
+                outputs=[clone_audio_out, clone_status, clone_metrics],
             )
             clone_cancel_btn_top.click(
                 cancel_status,
@@ -770,6 +832,7 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                         format="wav",
                     )
                     design_status = gr.Textbox(label=t("status"), interactive=False)
+                    design_metrics = gr.HTML(label=t("metrics"))
 
             design_autoplay.change(set_audio_autoplay, inputs=design_autoplay, outputs=design_audio_out)
             design_inputs = [
@@ -780,12 +843,12 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
             design_top_event = design_btn_top.click(
                 generate_design,
                 inputs=design_inputs,
-                outputs=[design_audio_out, design_status],
+                outputs=[design_audio_out, design_status, design_metrics],
             )
             design_event = design_btn.click(
                 generate_design,
                 inputs=design_inputs,
-                outputs=[design_audio_out, design_status],
+                outputs=[design_audio_out, design_status, design_metrics],
             )
             design_cancel_btn_top.click(
                 cancel_status,
@@ -843,6 +906,7 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                         format="wav",
                     )
                     voice_status = gr.Textbox(label=t("status"), interactive=False)
+                    voice_metrics = gr.HTML(label=t("metrics"))
 
             voices_refresh_btn.click(list_voices, outputs=voice_dropdown)
             voice_autoplay.change(set_audio_autoplay, inputs=voice_autoplay, outputs=voice_audio_out)
@@ -855,12 +919,12 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
             voice_top_event = voice_btn_top.click(
                 generate_voice,
                 inputs=voice_inputs,
-                outputs=[voice_audio_out, voice_status],
+                outputs=[voice_audio_out, voice_status, voice_metrics],
             )
             voice_event = voice_btn.click(
                 generate_voice,
                 inputs=voice_inputs,
-                outputs=[voice_audio_out, voice_status],
+                outputs=[voice_audio_out, voice_status, voice_metrics],
             )
             voice_cancel_btn_top.click(
                 cancel_status,
