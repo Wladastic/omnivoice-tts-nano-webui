@@ -30,7 +30,17 @@ if not root.handlers:
     root.addHandler(stream_handler)
 
 # reduce noise from noisy libs
-for noisy in ("httpx", "httpcore", "urllib3", "huggingface_hub"):
+for noisy in (
+    "httpx",
+    "httpcore",
+    "urllib3",
+    "huggingface_hub",
+    "librosa",
+    "numba",
+    "matplotlib",
+    "PIL",
+    "soundfile",
+):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
 app = FastAPI(title="OmniVoice API", version="0.1.0")
