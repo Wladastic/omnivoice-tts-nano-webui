@@ -237,6 +237,7 @@ def _speech_stream_fields(
         "preprocess_prompt": str(bool(preprocess_prompt)).lower(),
         "postprocess_output": str(bool(postprocess_output)).lower(),
         "clean_markdown": str(bool(clean_markdown)).lower(),
+        "x_vector_only_mode": str(bool(speaker_embedding_only)).lower(),
     }
     if dynamic_steps:
         fields["dynamic_steps"] = "true"
@@ -247,9 +248,23 @@ def _speech_stream_fields(
         fields["language"] = language
     if instruct:
         fields["instruct"] = instruct
-    if speaker_embedding_only:
-        fields["x_vector_only_mode"] = "true"
     return fields
+
+
+def _log_speech_request(source: str, payload: dict):
+    dynamic_enabled = payload.get("dynamic_steps") == "true" or payload.get("model") == "dynamic"
+    print(
+        "[frontend] speech request "
+        f"source={source} stream={payload.get('stream')} "
+        f"steps={payload.get('num_step')} "
+        f"dynamic={dynamic_enabled} "
+        f"dynamic_min={payload.get('dynamic_min_steps', '-')} "
+        f"dynamic_max={payload.get('dynamic_max_steps', '-')} "
+        f"dynamic_speed={payload.get('dynamic_desired_speed', '-')} "
+        f"speaker_embedding_only={payload.get('x_vector_only_mode')} "
+        f"voice={payload.get('voice', '-')}",
+        flush=True,
+    )
 
 
 def _pcm_bytes_to_audio(response_bytes: bytes):
@@ -507,6 +522,7 @@ def generate_clone(
     )
     if ref_text:
         fields["ref_text"] = ref_text
+    _log_speech_request("clone", fields)
     if stream_audio:
         yield from _stream_speech_multipart(fields, ref_audio, "clone")
     else:
@@ -532,6 +548,7 @@ def generate_design(
         preprocess_prompt, postprocess_output, False, clean_markdown, stream_audio,
         dynamic_steps, dynamic_min_steps, dynamic_max_steps, dynamic_desired_speed,
     )
+    _log_speech_request("design", payload)
     if stream_audio:
         yield from _stream_speech_json(payload, "design")
     else:
@@ -558,6 +575,7 @@ def generate_voice(
         dynamic_steps, dynamic_min_steps, dynamic_max_steps, dynamic_desired_speed,
     )
     payload["voice"] = voice_id
+    _log_speech_request("saved_voice", payload)
     output_label = f"voice-{voice_id}"
     if stream_audio:
         yield from _stream_speech_json(payload, output_label)

@@ -126,6 +126,13 @@ def _kwargs_for_chunk(kw_base: dict, chunk: str, dynamic_state: Optional[dict] =
     return kw
 
 
+def _chunk_steps(kw_base: dict, dynamic_state: Optional[dict] = None) -> int:
+    if dynamic_state is not None:
+        return dynamic_state["current_steps"]
+    config = kw_base.get("generation_config")
+    return getattr(config, "num_step", 0)
+
+
 def _update_dynamic_steps(dynamic_state: Optional[dict], audio: np.ndarray, sampling_rate: int, elapsed_s: float) -> None:
     if dynamic_state is None or elapsed_s <= 0:
         return
@@ -274,12 +281,14 @@ def _encode_stream_chunk(audio: np.ndarray, sampling_rate: int, response_format:
 def _create_voice_clone_prompt(model, ref_audio, ref_text=None, x_vector_only_mode=False):
     create_prompt = model.create_voice_clone_prompt
     if x_vector_only_mode:
+        logger.info("[openai] voice conditioning: speaker embedding only requested")
         try:
             sig = inspect.signature(create_prompt)
         except (TypeError, ValueError):
             sig = None
 
         if sig is None or "x_vector_only_mode" in sig.parameters:
+            logger.info("[openai] voice conditioning: using native x_vector_only_mode")
             return create_prompt(
                 ref_audio=ref_audio,
                 ref_text=ref_text,
@@ -305,6 +314,7 @@ def _create_voice_clone_prompt(model, ref_audio, ref_text=None, x_vector_only_mo
         )
         return prompt
 
+    logger.info("[openai] voice conditioning: full reference prompt")
     return create_prompt(ref_audio=ref_audio, ref_text=ref_text)
 
 
@@ -345,6 +355,14 @@ def _generate_audio_stream(
             if need_gap and CHUNK_GAP_MS > 0:
                 yield _encode_stream_chunk(gap, model.sampling_rate, response_format)
 
+            logger.info(
+                "[openai] stream chunk %d/%d using %d inference step%s%s",
+                text_i,
+                len(text_chunks),
+                _chunk_steps(kw_base, dynamic_state),
+                "" if _chunk_steps(kw_base, dynamic_state) == 1 else "s",
+                " (dynamic)" if dynamic_state is not None else " (fixed)",
+            )
             started_at = time.monotonic()
             out = model.generate(**_kwargs_for_chunk(kw_base, chunk, dynamic_state))
             _update_dynamic_steps(dynamic_state, out[0], model.sampling_rate, time.monotonic() - started_at)
@@ -384,6 +402,13 @@ def _generate_audio_sequence(
         if need_gap and CHUNK_GAP_MS > 0:
             parts.append(gap)
         started_at = time.monotonic()
+        logger.info(
+            "[openai] sequence chunk %d using %d inference step%s%s",
+            n_text_chunks + 1,
+            _chunk_steps(kw_base, dynamic_state),
+            "" if _chunk_steps(kw_base, dynamic_state) == 1 else "s",
+            " (dynamic)" if dynamic_state is not None else " (fixed)",
+        )
         out = model.generate(**_kwargs_for_chunk(kw_base, chunk, dynamic_state))
         _update_dynamic_steps(dynamic_state, out[0], model.sampling_rate, time.monotonic() - started_at)
         parts.append(out[0])
@@ -452,13 +477,17 @@ async def openai_speech(request: Request):
     else:
         num_step = _int_value(data, "num_step", MODEL_STEPS.get(model, DEFAULT_STEPS))
     logger.info(
-        "[openai] request model=%r voice=%r response_format=%r stream=%s text_len=%d dynamic=%s",
+        "[openai] request model=%r voice=%r response_format=%r stream=%s text_len=%d "
+        "dynamic=%s dynamic_raw=%r x_vector_only=%s raw=%r",
         requested_model,
         voice,
         response_format,
         stream,
         len(input),
         dynamic_enabled,
+        data.get("dynamic_steps") or data.get("dynamic_inference_steps"),
+        x_vector_only_mode,
+        data.get("x_vector_only_mode"),
     )
     reset_peak_vram()
     omni = get_model()
@@ -494,6 +523,8 @@ async def openai_speech(request: Request):
             dynamic_state["current_steps"],
             dynamic_state["desired_speed"],
         )
+    else:
+        logger.info("[openai] dynamic steps disabled; fixed inference steps=%d", req.num_step)
     kw = _build_kwargs(req, gen_config)
 
     tmp_path = None
