@@ -43,7 +43,7 @@ MODEL_STEPS = {
     "gpt-4o-tts": 32,
 }
 DEFAULT_STEPS = 16
-SUPPORTED_RESPONSE_FORMATS = {"wav", "pcm", "mp3"}
+SUPPORTED_RESPONSE_FORMATS = {"wav", "pcm", "mp3", "opus"}
 
 
 def _truthy(value) -> bool:
@@ -254,12 +254,20 @@ def _format_audio_response(wav_bytes: bytes, response_format: str) -> tuple[byte
         audio.export(buf, format="mp3")
         buf.seek(0)
         return buf.read(), "audio/mpeg"
+    if response_format == "opus":
+        audio = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
+        buf = io.BytesIO()
+        audio.export(buf, format="opus", codec="libopus")
+        buf.seek(0)
+        return buf.read(), "audio/opus"
     raise HTTPException(400, f"Unsupported response_format={response_format!r}")
 
 
 def _stream_media_type(response_format: str) -> str:
     if response_format == "mp3":
         return "audio/mpeg"
+    if response_format == "opus":
+        return "audio/opus"
     if response_format == "pcm":
         return "audio/pcm"
     return "audio/wav"
@@ -273,6 +281,13 @@ def _encode_stream_chunk(audio: np.ndarray, sampling_rate: int, response_format:
         segment = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
         buf = io.BytesIO()
         segment.export(buf, format="mp3")
+        buf.seek(0)
+        return buf.read()
+    if response_format == "opus":
+        wav_bytes = _audio_to_wav_bytes(audio, sampling_rate)
+        segment = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
+        buf = io.BytesIO()
+        segment.export(buf, format="opus", codec="libopus")
         buf.seek(0)
         return buf.read()
     return _audio_to_pcm_bytes(audio)

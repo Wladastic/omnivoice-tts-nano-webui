@@ -729,7 +729,239 @@ def load_model():
         return f"{t('error_prefix')}: {e}"
 
 
-with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
+CTRL_ENTER_JS = """
+() => {
+    if (window.__omniVoiceUiBound) {
+        return;
+    }
+    window.__omniVoiceUiBound = true;
+
+    const storagePrefix = "omniVoiceWebui.";
+    const defaultTab = "voices";
+    const tabLabels = {
+        clone: ["Voice Cloning", "Stimmen-Klonen"],
+        design: ["Voice Design", "Stimmen-Design"],
+        voices: ["Saved Voices", "Gespeicherte Stimmen"],
+        create: ["Create Voice", "Stimme erstellen"],
+        manage: ["Manage Voices", "Stimmen verwalten"],
+        history: ["History", "Verlauf"],
+    };
+    const generateButtonIds = {
+        voices: ["voice-generate-btn", "voice-generate-top-btn"],
+        clone: ["clone-generate-btn", "clone-generate-top-btn"],
+        design: ["design-generate-btn", "design-generate-top-btn"],
+    };
+    const cancelButtonIds = {
+        voices: "voice-cancel-btn",
+        clone: "clone-cancel-btn",
+        design: "design-cancel-btn",
+    };
+    const persistedFields = {
+        "voice-text": "voiceText",
+        "voice-dropdown": "voiceDropdown",
+        "voice-instruct": "voiceInstruct",
+        "clone-text": "cloneText",
+        "clone-ref-text": "cloneRefText",
+        "clone-instruct": "cloneInstruct",
+        "design-text": "designText",
+        "design-instruct": "designInstruct",
+    };
+
+    const storageGet = (key) => {
+        try {
+            return window.localStorage.getItem(storagePrefix + key);
+        } catch (_) {
+            return null;
+        }
+    };
+    const storageSet = (key, value) => {
+        try {
+            window.localStorage.setItem(storagePrefix + key, value ?? "");
+        } catch (_) {}
+    };
+
+    const isVisible = (element) => {
+        if (!element) {
+            return false;
+        }
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+
+    const nativeSetValue = (element, value) => {
+        const prototype = element instanceof HTMLTextAreaElement
+            ? HTMLTextAreaElement.prototype
+            : HTMLInputElement.prototype;
+        const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
+        if (descriptor?.set) {
+            descriptor.set.call(element, value);
+        } else {
+            element.value = value;
+        }
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+
+    const editableIn = (root) => root?.querySelector("textarea, input:not([type='hidden'])");
+
+    const bindPersistedFields = () => {
+        for (const [id, key] of Object.entries(persistedFields)) {
+            const root = document.getElementById(id);
+            const input = editableIn(root);
+            if (!input || input.dataset.omniPersistBound === "true") {
+                continue;
+            }
+            input.dataset.omniPersistBound = "true";
+            const saved = storageGet(key);
+            if (saved != null && saved !== "" && input.value !== saved) {
+                nativeSetValue(input, saved);
+            }
+            input.addEventListener("input", () => storageSet(key, input.value));
+            input.addEventListener("change", () => storageSet(key, input.value));
+        }
+    };
+
+    const stopAllAudio = () => {
+        document.querySelectorAll("audio").forEach((audio) => {
+            try {
+                audio.pause();
+                audio.currentTime = 0;
+            } catch (_) {}
+        });
+    };
+
+    const clickButtonRoot = (id) => {
+        const root = document.getElementById(id);
+        const button = root?.querySelector("button") || root;
+        if (button && !button.disabled) {
+            button.click();
+        }
+    };
+
+    const cancelOtherGenerations = (activeTab) => {
+        for (const [tab, id] of Object.entries(cancelButtonIds)) {
+            if (tab !== activeTab) {
+                clickButtonRoot(id);
+            }
+        }
+    };
+
+    const buttonRoots = (ids) => (Array.isArray(ids) ? ids : [ids])
+        .map((id) => document.getElementById(id))
+        .filter(Boolean);
+
+    const activeGenerate = () => {
+        for (const [tab, ids] of Object.entries(generateButtonIds)) {
+            for (const root of buttonRoots(ids)) {
+                if (!isVisible(root)) {
+                    continue;
+                }
+                return { tab, button: root.querySelector("button") || root };
+            }
+        }
+        return null;
+    };
+
+    const allTabButtons = () => Array.from(document.querySelectorAll("[role='tab'], button"));
+    const findTabButton = (tabId) => {
+        const labels = tabLabels[tabId] || [];
+        return allTabButtons().find((button) => {
+            const text = (button.textContent || "").trim();
+            return labels.some((label) => text === label || text.includes(label));
+        });
+    };
+
+    const currentTabFromButton = (button) => {
+        const text = (button?.textContent || "").trim();
+        for (const [tab, labels] of Object.entries(tabLabels)) {
+            if (labels.some((label) => text === label || text.includes(label))) {
+                return tab;
+            }
+        }
+        return null;
+    };
+
+    const activateInitialTab = () => {
+        if (window.__omniVoiceInitialTabDone) {
+            return;
+        }
+        const target = storageGet("activeTab") || defaultTab;
+        const button = findTabButton(target) || findTabButton(defaultTab);
+        if (!button) {
+            return;
+        }
+        window.__omniVoiceInitialTabDone = true;
+        button.click();
+    };
+
+    const bindGenerateButtons = () => {
+        for (const [tab, ids] of Object.entries(generateButtonIds)) {
+            for (const root of buttonRoots(ids)) {
+                const button = root.querySelector("button") || root;
+                if (!button || button.dataset.omniGenerateBound === "true") {
+                    continue;
+                }
+                button.dataset.omniGenerateBound = "true";
+                button.addEventListener("click", () => {
+                    stopAllAudio();
+                    cancelOtherGenerations(tab);
+                    storageSet("activeTab", tab);
+                }, true);
+            }
+        }
+    };
+
+    const bindTabButtons = () => {
+        for (const button of allTabButtons()) {
+            if (button.dataset.omniTabBound === "true") {
+                continue;
+            }
+            const tab = currentTabFromButton(button);
+            if (!tab) {
+                continue;
+            }
+            button.dataset.omniTabBound = "true";
+            button.addEventListener("click", () => {
+                storageSet("activeTab", tab);
+                stopAllAudio();
+                cancelOtherGenerations(tab);
+            }, true);
+        }
+    };
+
+    const refreshBindings = () => {
+        bindPersistedFields();
+        bindGenerateButtons();
+        bindTabButtons();
+        activateInitialTab();
+    };
+
+    document.addEventListener("keydown", (event) => {
+        if (!(event.ctrlKey || event.metaKey) || event.key !== "Enter") {
+            return;
+        }
+        const active = activeGenerate();
+        if (!active?.button || active.button.disabled) {
+            return;
+        }
+        event.preventDefault();
+        stopAllAudio();
+        cancelOtherGenerations(active.tab);
+        storageSet("activeTab", active.tab);
+        active.button.click();
+    }, true);
+
+    const observer = new MutationObserver(refreshBindings);
+    observer.observe(document.body, { childList: true, subtree: true });
+    window.setTimeout(refreshBindings, 250);
+    window.setTimeout(refreshBindings, 1000);
+    window.setTimeout(refreshBindings, 2500);
+}
+"""
+
+
+with gr.Blocks(title=t("title"), theme=gr.themes.Soft(), js=CTRL_ENTER_JS) as demo:
     gr.Markdown(f"# {t('title')}\n{t('subtitle')}")
 
     with gr.Row():
@@ -741,13 +973,13 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
     load_btn.click(load_model, outputs=status_box)
     demo.load(model_status, outputs=status_box)
 
-    with gr.Tabs():
+    with gr.Tabs(selected="voices"):
 
         # --- Voice Clone tab ---
         with gr.Tab(t("tab_clone"), id="clone", render_children=True):
             with gr.Row():
                 with gr.Column():
-                    clone_text = gr.Textbox(label=t("text"), lines=4, placeholder=t("text_placeholder"))
+                    clone_text = gr.Textbox(label=t("text"), lines=4, placeholder=t("text_placeholder"), elem_id="clone-text")
                     clone_lang = gr.Dropdown(LANGUAGES, value="Auto", label=t("language"))
                     clone_ref_audio = gr.Audio(
                         label=t("ref_audio"),
@@ -757,8 +989,8 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     clone_trim_btn = gr.Button(t("trim_clone"), size="sm")
                     clone_ref_trimmed = gr.Audio(label=t("trimmed"), type="filepath")
                     clone_transcribe_btn = gr.Button(t("transcribe"), size="sm")
-                    clone_ref_text = gr.Textbox(label=t("ref_text_optional"), lines=2)
-                    clone_instruct = gr.Textbox(label=t("instruct_clone"), lines=1)
+                    clone_ref_text = gr.Textbox(label=t("ref_text_optional"), lines=2, elem_id="clone-ref-text")
+                    clone_instruct = gr.Textbox(label=t("instruct_clone"), lines=1, elem_id="clone-instruct")
                     gr.Markdown(t("advanced_options"))
                     clone_num_step = gr.Slider(1, 200, value=32, step=1, label=t("diffusion_steps"))
                     with gr.Row():
@@ -783,11 +1015,11 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     clone_speed = gr.Slider(0.1, 3.0, value=1.0, step=0.05, label=t("speed"))
                     clone_duration = gr.Number(value=0.0, label=t("duration"))
                     with gr.Row():
-                        clone_btn = gr.Button(t("synthesize"), variant="primary")
-                        clone_cancel_btn = gr.Button(t("cancel"), variant="stop")
+                        clone_btn = gr.Button(t("synthesize"), variant="primary", elem_id="clone-generate-btn")
+                        clone_cancel_btn = gr.Button(t("cancel"), variant="stop", elem_id="clone-cancel-btn")
                 with gr.Column():
                     with gr.Row():
-                        clone_btn_top = gr.Button(t("synthesize"), variant="primary")
+                        clone_btn_top = gr.Button(t("synthesize"), variant="primary", elem_id="clone-generate-top-btn")
                         clone_cancel_btn_top = gr.Button(t("cancel"), variant="stop")
                     with gr.Row():
                         clone_stream = gr.Checkbox(value=True, label=t("stream_audio"))
@@ -830,22 +1062,25 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                 cancel_status,
                 cancels=[clone_top_event, clone_event],
                 outputs=clone_status,
+                api_visibility="undocumented",
             )
             clone_cancel_btn.click(
                 cancel_status,
                 cancels=[clone_top_event, clone_event],
                 outputs=clone_status,
+                api_visibility="undocumented",
             )
 
         # --- Voice Design tab ---
         with gr.Tab(t("tab_design"), id="design", render_children=True):
             with gr.Row():
                 with gr.Column():
-                    design_text = gr.Textbox(label=t("text"), lines=4, placeholder=t("text_placeholder"))
+                    design_text = gr.Textbox(label=t("text"), lines=4, placeholder=t("text_placeholder"), elem_id="design-text")
                     design_lang = gr.Dropdown(LANGUAGES, value="Auto", label=t("language"))
                     design_instruct = gr.Textbox(
                         label=t("speaker_instruct"),
                         lines=3,
+                        elem_id="design-instruct",
                         placeholder=t("speaker_instruct_placeholder"),
                     )
                     gr.Markdown(t("advanced_options"))
@@ -868,11 +1103,11 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     design_speed = gr.Slider(0.1, 3.0, value=1.0, step=0.05, label=t("speed"))
                     design_duration = gr.Number(value=0.0, label=t("duration"))
                     with gr.Row():
-                        design_btn = gr.Button(t("synthesize"), variant="primary")
-                        design_cancel_btn = gr.Button(t("cancel"), variant="stop")
+                        design_btn = gr.Button(t("synthesize"), variant="primary", elem_id="design-generate-btn")
+                        design_cancel_btn = gr.Button(t("cancel"), variant="stop", elem_id="design-cancel-btn")
                 with gr.Column():
                     with gr.Row():
-                        design_btn_top = gr.Button(t("synthesize"), variant="primary")
+                        design_btn_top = gr.Button(t("synthesize"), variant="primary", elem_id="design-generate-top-btn")
                         design_cancel_btn_top = gr.Button(t("cancel"), variant="stop")
                     with gr.Row():
                         design_stream = gr.Checkbox(value=True, label=t("stream_audio"))
@@ -908,11 +1143,13 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                 cancel_status,
                 cancels=[design_top_event, design_event],
                 outputs=design_status,
+                api_visibility="undocumented",
             )
             design_cancel_btn.click(
                 cancel_status,
                 cancels=[design_top_event, design_event],
                 outputs=design_status,
+                api_visibility="undocumented",
             )
 
         # --- Saved Voices tab ---
@@ -924,11 +1161,12 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                         value="none",
                         label=t("voice"),
                         interactive=True,
+                        elem_id="voice-dropdown",
                     )
                     voices_refresh_btn = gr.Button(t("refresh_voices"))
-                    voice_text = gr.Textbox(label=t("text"), lines=4)
+                    voice_text = gr.Textbox(label=t("text"), lines=4, elem_id="voice-text")
                     voice_lang = gr.Dropdown(LANGUAGES, value="Auto", label=t("language"))
-                    voice_instruct = gr.Textbox(label=t("instruct_optional"), lines=1)
+                    voice_instruct = gr.Textbox(label=t("instruct_optional"), lines=1, elem_id="voice-instruct")
                     gr.Markdown(t("advanced_options"))
                     voice_num_step = gr.Slider(1, 200, value=32, step=1, label=t("diffusion_steps"))
                     with gr.Row():
@@ -953,11 +1191,11 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                     voice_speed = gr.Slider(0.1, 3.0, value=1.0, step=0.05, label=t("speed"))
                     voice_duration = gr.Number(value=0.0, label=t("duration"))
                     with gr.Row():
-                        voice_btn = gr.Button(t("synthesize"), variant="primary")
-                        voice_cancel_btn = gr.Button(t("cancel"), variant="stop")
+                        voice_btn = gr.Button(t("synthesize"), variant="primary", elem_id="voice-generate-btn")
+                        voice_cancel_btn = gr.Button(t("cancel"), variant="stop", elem_id="voice-cancel-btn")
                 with gr.Column():
                     with gr.Row():
-                        voice_btn_top = gr.Button(t("synthesize"), variant="primary")
+                        voice_btn_top = gr.Button(t("synthesize"), variant="primary", elem_id="voice-generate-top-btn")
                         voice_cancel_btn_top = gr.Button(t("cancel"), variant="stop")
                     with gr.Row():
                         voice_stream = gr.Checkbox(value=True, label=t("stream_audio"))
@@ -994,11 +1232,13 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft()) as demo:
                 cancel_status,
                 cancels=[voice_top_event, voice_event],
                 outputs=voice_status,
+                api_visibility="undocumented",
             )
             voice_cancel_btn.click(
                 cancel_status,
                 cancels=[voice_top_event, voice_event],
                 outputs=voice_status,
+                api_visibility="undocumented",
             )
 
         # --- Create Voice tab ---
