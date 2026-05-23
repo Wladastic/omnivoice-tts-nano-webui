@@ -1062,13 +1062,13 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft(), js=CTRL_ENTER_JS) as de
                 cancel_status,
                 cancels=[clone_top_event, clone_event],
                 outputs=clone_status,
-                api_visibility="undocumented",
+                show_api=False,
             )
             clone_cancel_btn.click(
                 cancel_status,
                 cancels=[clone_top_event, clone_event],
                 outputs=clone_status,
-                api_visibility="undocumented",
+                show_api=False,
             )
 
         # --- Voice Design tab ---
@@ -1143,13 +1143,13 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft(), js=CTRL_ENTER_JS) as de
                 cancel_status,
                 cancels=[design_top_event, design_event],
                 outputs=design_status,
-                api_visibility="undocumented",
+                show_api=False,
             )
             design_cancel_btn.click(
                 cancel_status,
                 cancels=[design_top_event, design_event],
                 outputs=design_status,
-                api_visibility="undocumented",
+                show_api=False,
             )
 
         # --- Saved Voices tab ---
@@ -1232,13 +1232,13 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft(), js=CTRL_ENTER_JS) as de
                 cancel_status,
                 cancels=[voice_top_event, voice_event],
                 outputs=voice_status,
-                api_visibility="undocumented",
+                show_api=False,
             )
             voice_cancel_btn.click(
                 cancel_status,
                 cancels=[voice_top_event, voice_event],
                 outputs=voice_status,
-                api_visibility="undocumented",
+                show_api=False,
             )
 
         # --- Create Voice tab ---
