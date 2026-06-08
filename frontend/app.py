@@ -110,7 +110,40 @@ def _current_peak_vram() -> float | None:
         return None
 
 
-def _metrics_html(generated_samples: int, started_at: float, peak_vram: float | None = None) -> str:
+CHARS_PER_AUDIO_SECOND = float(os.environ.get("CHARS_PER_AUDIO_SECOND", "14.0"))
+
+
+def _format_eta(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    if seconds >= 60:
+        m, s = divmod(int(round(seconds)), 60)
+        return f"{m}m{s:02d}s"
+    return f"{seconds:.1f}s"
+
+
+def _progress_estimate(generated_s: float, elapsed: float, text_length: int, done: bool):
+    if text_length <= 0:
+        return None
+    estimated_total_s = max(1.0, text_length / max(1.0, CHARS_PER_AUDIO_SECOND))
+    if done:
+        return 1.0, 0.0
+    progress = generated_s / estimated_total_s
+    progress = min(0.99, max(0.0, progress))
+    ratio = generated_s / elapsed if elapsed > 0 else 0.0
+    if ratio > 0 and progress < 1.0:
+        eta = (estimated_total_s - generated_s) / ratio
+    else:
+        eta = 0.0
+    return progress, eta
+
+
+def _metrics_html(
+    generated_samples: int,
+    started_at: float,
+    peak_vram: float | None = None,
+    text_length: int = 0,
+    done: bool = False,
+) -> str:
     elapsed = max(0.001, time.monotonic() - started_at)
     generated_s = generated_samples / STREAM_SAMPLE_RATE
     ratio = generated_s / elapsed
@@ -124,11 +157,31 @@ def _metrics_html(generated_samples: int, started_at: float, peak_vram: float | 
         color = "#6b7280"
         label = "behind playback"
     peak = f" · peak {peak_vram:.2f}GB VRAM" if peak_vram is not None else ""
+
+    progress_block = ""
+    est = _progress_estimate(generated_s, elapsed, text_length, done)
+    if est is not None:
+        progress, eta = est
+        pct = progress * 100.0
+        bar_color = "#16a34a" if done else "#3b82f6"
+        eta_text = "done" if done else f"ETA {_format_eta(eta)}"
+        progress_block = (
+            "<div style='margin-top:0.35rem;'>"
+            "<div style='background:#e5e7eb;border-radius:999px;height:0.55rem;overflow:hidden;'>"
+            f"<div style='width:{pct:.1f}%;background:{bar_color};height:100%;transition:width 0.2s;'></div>"
+            "</div>"
+            "<div style='font-size:0.82rem;color:#374151;margin-top:0.2rem;'>"
+            f"<strong>{pct:.1f}%</strong> · {eta_text}"
+            "</div>"
+            "</div>"
+        )
+
     return (
         "<div style='font-family: system-ui, sans-serif; font-size: 0.92rem;'>"
         f"<span style='display:inline-block;width:0.75rem;height:0.75rem;border-radius:999px;background:{color};margin-right:0.45rem;'></span>"
         f"<strong>{ratio:.2f}x</strong> {label}"
         f" · audio {generated_s:.1f}s · elapsed {elapsed:.1f}s{peak}"
+        f"{progress_block}"
         "</div>"
     )
 
@@ -151,7 +204,7 @@ def _iter_buffered_audio(samples, state):
             return [(
                 gr.skip(),
                 _buffer_status(state["buffered_samples"]),
-                _metrics_html(state["generated_samples"], state["started_at"]),
+                _metrics_html(state["generated_samples"], state["started_at"], text_length=state["text_length"]),
             )]
         samples = np.concatenate(state["buffered"])
         state["buffered"] = []
@@ -163,7 +216,7 @@ def _iter_buffered_audio(samples, state):
         outputs.append((
             (STREAM_SAMPLE_RATE, state["pending"]),
             _stream_status(state["total_bytes"]),
-            _metrics_html(state["generated_samples"], state["started_at"]),
+            _metrics_html(state["generated_samples"], state["started_at"], text_length=state["text_length"]),
         ))
     state["pending"] = samples
     return outputs
@@ -179,7 +232,7 @@ def _finish_buffered_audio(state):
             outputs.append((
                 (STREAM_SAMPLE_RATE, state["pending"]),
                 _stream_status(state["total_bytes"]),
-                _metrics_html(state["generated_samples"], state["started_at"]),
+                _metrics_html(state["generated_samples"], state["started_at"], text_length=state["text_length"]),
             ))
         state["pending"] = samples
     if state["pending"] is not None:
@@ -189,14 +242,14 @@ def _finish_buffered_audio(state):
         outputs.append((
             (STREAM_SAMPLE_RATE, state["pending"]),
             _done_status(saved_path),
-            _metrics_html(state["generated_samples"], state["started_at"], peak_vram),
+            _metrics_html(state["generated_samples"], state["started_at"], peak_vram, text_length=state["text_length"], done=True),
         ))
     else:
         outputs.append((gr.skip(), t("done"), _empty_metrics()))
     return outputs
 
 
-def _new_stream_buffer_state():
+def _new_stream_buffer_state(text_length: int = 0):
     start_samples = int(STREAM_SAMPLE_RATE * STREAM_START_BUFFER_SECONDS)
     return {
         "started": start_samples <= 0,
@@ -209,6 +262,7 @@ def _new_stream_buffer_state():
         "generated_samples": 0,
         "started_at": time.monotonic(),
         "total_bytes": 0,
+        "text_length": int(text_length or 0),
     }
 
 
@@ -312,7 +366,7 @@ def _buffered_speech_multipart(fields: dict, ref_audio: str, output_label: str):
 def _stream_speech_json(payload: dict, output_label: str):
     yield gr.skip(), t("streaming"), _empty_metrics()
     remainder = b""
-    state = _new_stream_buffer_state()
+    state = _new_stream_buffer_state(text_length=len(str(payload.get("input", ""))))
     state["output_label"] = output_label
     try:
         with httpx.stream(
@@ -346,7 +400,7 @@ def _stream_speech_json(payload: dict, output_label: str):
 def _stream_speech_multipart(fields: dict, ref_audio: str, output_label: str):
     yield gr.skip(), t("streaming"), _empty_metrics()
     remainder = b""
-    state = _new_stream_buffer_state()
+    state = _new_stream_buffer_state(text_length=len(str(fields.get("input", ""))))
     state["output_label"] = output_label
     try:
         with open(ref_audio, "rb") as f:
@@ -980,6 +1034,8 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft(), js=CTRL_ENTER_JS) as de
             with gr.Row():
                 with gr.Column():
                     clone_text = gr.Textbox(label=t("text"), lines=4, placeholder=t("text_placeholder"), elem_id="clone-text")
+                    clone_text_clear_btn = gr.Button(t("clear_text"), size="sm")
+                    clone_text_clear_btn.click(lambda: "", outputs=clone_text)
                     clone_lang = gr.Dropdown(LANGUAGES, value="Auto", label=t("language"))
                     clone_ref_audio = gr.Audio(
                         label=t("ref_audio"),
@@ -1076,6 +1132,8 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft(), js=CTRL_ENTER_JS) as de
             with gr.Row():
                 with gr.Column():
                     design_text = gr.Textbox(label=t("text"), lines=4, placeholder=t("text_placeholder"), elem_id="design-text")
+                    design_text_clear_btn = gr.Button(t("clear_text"), size="sm")
+                    design_text_clear_btn.click(lambda: "", outputs=design_text)
                     design_lang = gr.Dropdown(LANGUAGES, value="Auto", label=t("language"))
                     design_instruct = gr.Textbox(
                         label=t("speaker_instruct"),
@@ -1165,6 +1223,8 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft(), js=CTRL_ENTER_JS) as de
                     )
                     voices_refresh_btn = gr.Button(t("refresh_voices"))
                     voice_text = gr.Textbox(label=t("text"), lines=4, elem_id="voice-text")
+                    voice_text_clear_btn = gr.Button(t("clear_text"), size="sm")
+                    voice_text_clear_btn.click(lambda: "", outputs=voice_text)
                     voice_lang = gr.Dropdown(LANGUAGES, value="Auto", label=t("language"))
                     voice_instruct = gr.Textbox(label=t("instruct_optional"), lines=1, elem_id="voice-instruct")
                     gr.Markdown(t("advanced_options"))
