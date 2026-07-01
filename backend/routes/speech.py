@@ -291,10 +291,12 @@ def _normalize_time(match: re.Match, lang: str) -> str:
     if lang == "en":
         if minute == 0:
             return f"{_number_words(hour, lang)} o'clock"
-        return f"{_number_words(hour, lang)} {_number_words(minute, lang)}"
+        minute_words = "oh " + _number_words(minute, lang) if minute < 10 else _number_words(minute, lang)
+        return f"{_number_words(hour, lang)} {minute_words}"
     if minute == 0:
         return f"{_number_words(hour, lang)} Uhr"
-    return f"{_number_words(hour, lang)} Uhr {_number_words(minute, lang)}"
+    minute_words = "null " + _number_words(minute, lang) if minute < 10 else _number_words(minute, lang)
+    return f"{_number_words(hour, lang)} Uhr {minute_words}"
 
 
 def _normalize_date(match: re.Match, lang: str) -> str:
