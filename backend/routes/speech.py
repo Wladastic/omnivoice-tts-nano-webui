@@ -55,6 +55,9 @@ def _truthy(value) -> bool:
 
 
 DEFAULT_CLEAN_MARKDOWN = _truthy(os.environ.get("CLEAN_MARKDOWN", "true"))
+DEFAULT_STRIP_EMOJI = _truthy(os.environ.get("STRIP_EMOJI", "true"))
+DEFAULT_NORMALIZE_SPOKEN_TEXT = _truthy(os.environ.get("NORMALIZE_SPOKEN_TEXT", "false"))
+DEFAULT_SPOKEN_TEXT_LANGUAGE = os.environ.get("SPOKEN_TEXT_LANGUAGE", "de").strip().lower() or "de"
 PARAGRAPH_PAUSE_MS = int(os.environ.get("PARAGRAPH_PAUSE_MS", "200"))
 
 
@@ -167,6 +170,172 @@ def _update_dynamic_steps(dynamic_state: Optional[dict], audio: np.ndarray, samp
         )
 
 
+def _is_emoji_char(char: str) -> bool:
+    codepoint = ord(char)
+    return (
+        0x1F000 <= codepoint <= 0x1FAFF
+        or 0x2600 <= codepoint <= 0x27BF
+        or codepoint in {0x200D, 0xFE0E, 0xFE0F, 0x20E3}
+    )
+
+
+def _strip_emoji_for_tts(text: str) -> str:
+    return "".join(" " if _is_emoji_char(char) else char for char in text)
+
+
+_URL_RE = re.compile(r"\b(?:https?://|www\.)\S+|\b\S+@\S+\.\S+\b", re.IGNORECASE)
+
+_DE_UNITS = [
+    "null", "eins", "zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun",
+    "zehn", "elf", "zwölf", "dreizehn", "vierzehn", "fünfzehn", "sechzehn", "siebzehn", "achtzehn", "neunzehn",
+]
+_DE_TENS = {
+    20: "zwanzig", 30: "dreißig", 40: "vierzig", 50: "fünfzig",
+    60: "sechzig", 70: "siebzig", 80: "achtzig", 90: "neunzig",
+}
+_EN_UNITS = [
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen",
+]
+_EN_TENS = {
+    20: "twenty", 30: "thirty", 40: "forty", 50: "fifty",
+    60: "sixty", 70: "seventy", 80: "eighty", 90: "ninety",
+}
+_DE_MONTHS = [
+    "", "Januar", "Februar", "März", "April", "Mai", "Juni",
+    "Juli", "August", "September", "Oktober", "November", "Dezember",
+]
+_EN_MONTHS = [
+    "", "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+
+
+def _spoken_language(language: Optional[str]) -> str:
+    value = (language or DEFAULT_SPOKEN_TEXT_LANGUAGE).strip().lower()
+    if value in {"de", "ger", "german", "deutsch"} or value.startswith("german"):
+        return "de"
+    if value in {"en", "eng", "english"} or value.startswith("english"):
+        return "en"
+    return DEFAULT_SPOKEN_TEXT_LANGUAGE if DEFAULT_SPOKEN_TEXT_LANGUAGE in {"de", "en"} else "de"
+
+
+def _de_number(n: int) -> str:
+    if n < 0:
+        return "minus " + _de_number(abs(n))
+    if n < 20:
+        return _DE_UNITS[n]
+    if n < 100:
+        tens = n // 10 * 10
+        rest = n % 10
+        if rest == 0:
+            return _DE_TENS[tens]
+        unit = "ein" if rest == 1 else _DE_UNITS[rest]
+        return unit + "und" + _DE_TENS[tens]
+    if n < 1000:
+        hundreds = n // 100
+        rest = n % 100
+        prefix = ("ein" if hundreds == 1 else _DE_UNITS[hundreds]) + "hundert"
+        return prefix if rest == 0 else prefix + _de_number(rest)
+    if n < 1_000_000:
+        thousands = n // 1000
+        rest = n % 1000
+        prefix = ("ein" if thousands == 1 else _de_number(thousands)) + "tausend"
+        return prefix if rest == 0 else prefix + _de_number(rest)
+    return f"{n:,}".replace(",", " ")
+
+
+def _en_number(n: int) -> str:
+    if n < 0:
+        return "minus " + _en_number(abs(n))
+    if n < 20:
+        return _EN_UNITS[n]
+    if n < 100:
+        tens = n // 10 * 10
+        rest = n % 10
+        return _EN_TENS[tens] if rest == 0 else f"{_EN_TENS[tens]} {_EN_UNITS[rest]}"
+    if n < 1000:
+        hundreds = n // 100
+        rest = n % 100
+        prefix = _EN_UNITS[hundreds] + " hundred"
+        return prefix if rest == 0 else prefix + " " + _en_number(rest)
+    if n < 1_000_000:
+        thousands = n // 1000
+        rest = n % 1000
+        prefix = _en_number(thousands) + " thousand"
+        return prefix if rest == 0 else prefix + " " + _en_number(rest)
+    return f"{n:,}".replace(",", " ")
+
+
+def _number_words(n: int, lang: str) -> str:
+    return _en_number(n) if lang == "en" else _de_number(n)
+
+
+def _ordinal_words(n: int, lang: str) -> str:
+    if lang == "en":
+        special = {1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth", 8: "eighth", 9: "ninth", 12: "twelfth"}
+        if n in special:
+            return special[n]
+        return _en_number(n) + "th"
+    special = {1: "ersten", 3: "dritten", 7: "siebten", 8: "achten"}
+    if n in special:
+        return special[n]
+    return _de_number(n) + "ten" if n < 20 else _de_number(n) + "sten"
+
+
+def _normalize_time(match: re.Match, lang: str) -> str:
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour > 23 or minute > 59:
+        return match.group(0)
+    if lang == "en":
+        if minute == 0:
+            return f"{_number_words(hour, lang)} o'clock"
+        return f"{_number_words(hour, lang)} {_number_words(minute, lang)}"
+    if minute == 0:
+        return f"{_number_words(hour, lang)} Uhr"
+    return f"{_number_words(hour, lang)} Uhr {_number_words(minute, lang)}"
+
+
+def _normalize_date(match: re.Match, lang: str) -> str:
+    if match.group("iso"):
+        year = int(match.group("year"))
+        month = int(match.group("month"))
+        day = int(match.group("day"))
+    else:
+        day = int(match.group("day2"))
+        month = int(match.group("month2"))
+        year = int(match.group("year2")) if match.group("year2") else None
+    if not (1 <= day <= 31 and 1 <= month <= 12):
+        return match.group(0)
+    if lang == "en":
+        result = f"{_EN_MONTHS[month]} {_ordinal_words(day, lang)}"
+        return result if year is None else f"{result} {_number_words(year, lang)}"
+    result = f"{_ordinal_words(day, lang)} {_DE_MONTHS[month]}"
+    return result if year is None else f"{result} {_number_words(year, lang)}"
+
+
+def _normalize_number(match: re.Match, lang: str) -> str:
+    token = match.group(0)
+    try:
+        return _number_words(int(token.replace(".", "").replace(",", "")), lang)
+    except ValueError:
+        return token
+
+
+def _normalize_spoken_text_for_tts(text: str, language: Optional[str]) -> str:
+    lang = _spoken_language(language)
+    text = _URL_RE.sub(" ", text)
+    text = re.sub(
+        r"(?P<iso>(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2}))|(?P<day2>\d{1,2})\.(?P<month2>\d{1,2})\.(?P<year2>\d{2,4})?",
+        lambda match: _normalize_date(match, lang),
+        text,
+    )
+    text = re.sub(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", lambda match: _normalize_time(match, lang), text)
+    text = re.sub(r"(?<![\w.-])-?\d{1,6}(?![\w.-])", lambda match: _normalize_number(match, lang), text)
+    return text
+
+
 def _clean_markdown_paragraph(text: str) -> str:
     text = re.sub(r"```[\s\S]*?```", " ", text)
     text = re.sub(r"`([^`]+)`", r"\1", text)
@@ -180,6 +349,7 @@ def _clean_markdown_paragraph(text: str) -> str:
     text = re.sub(r"[*_~]{1,3}([^*_~]+)[*_~]{1,3}", r"\1", text)
     text = text.replace(":", ".")
     text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s+([,.!?;。！？])", r"\1", text)
     return text.strip()
 
 
@@ -202,7 +372,18 @@ def _clean_markdown_paragraphs(text: str) -> list[str]:
     return [_ensure_terminal_punctuation(p) for p in cleaned if p]
 
 
-def _text_chunks_for_speech(text: str, clean_markdown: bool) -> list[Optional[str]]:
+def _text_chunks_for_speech(
+    text: str,
+    clean_markdown: bool,
+    strip_emoji: bool = True,
+    normalize_spoken_text: bool = False,
+    language: Optional[str] = None,
+) -> list[Optional[str]]:
+    if strip_emoji:
+        text = _strip_emoji_for_tts(text)
+    if normalize_spoken_text:
+        text = _normalize_spoken_text_for_tts(text, language)
+
     if clean_markdown:
         paragraphs = _clean_markdown_paragraphs(text)
     else:
@@ -472,7 +653,9 @@ async def openai_speech(request: Request):
     stream = _truthy(data.get("stream"))
     x_vector_only_mode = _truthy(data.get("x_vector_only_mode"))
     clean_markdown = _truthy(data.get("clean_markdown", DEFAULT_CLEAN_MARKDOWN))
-    text_chunks = _text_chunks_for_speech(input, clean_markdown)
+    strip_emoji = _truthy(data.get("strip_emoji", DEFAULT_STRIP_EMOJI))
+    normalize_spoken_text = _truthy(data.get("normalize_spoken_text", DEFAULT_NORMALIZE_SPOKEN_TEXT))
+    text_chunks = _text_chunks_for_speech(input, clean_markdown, strip_emoji, normalize_spoken_text, language)
     if not any(chunk for chunk in text_chunks if chunk is not None):
         raise HTTPException(422, "Input contains no speakable text")
     input = " ".join(chunk for chunk in text_chunks if chunk is not None)
@@ -493,7 +676,7 @@ async def openai_speech(request: Request):
         num_step = _int_value(data, "num_step", MODEL_STEPS.get(model, DEFAULT_STEPS))
     logger.info(
         "[openai] request model=%r voice=%r response_format=%r stream=%s text_len=%d "
-        "dynamic=%s dynamic_raw=%r x_vector_only=%s raw=%r",
+        "dynamic=%s dynamic_raw=%r x_vector_only=%s strip_emoji=%s normalize_spoken_text=%s raw=%r",
         requested_model,
         voice,
         response_format,
@@ -502,6 +685,8 @@ async def openai_speech(request: Request):
         dynamic_enabled,
         data.get("dynamic_steps") or data.get("dynamic_inference_steps"),
         x_vector_only_mode,
+        strip_emoji,
+        normalize_spoken_text,
         data.get("x_vector_only_mode"),
     )
     reset_peak_vram()

@@ -57,6 +57,8 @@ TRANSLATIONS = {
         "postprocess_output": "Postprocess output",
         "speaker_embedding_only": "Speaker embedding only",
         "clean_markdown": "Clean Markdown",
+        "normalize_spoken_text": "Normalize spoken text",
+        "normalize_spoken_text_hint": "Removes bare links and spells out simple dates, times and numbers for speech.",
         "speed": "Speed",
         "duration": "Duration (s, 0 = auto)",
         # Clone tab
@@ -162,6 +164,8 @@ TRANSLATIONS = {
         "postprocess_output": "Ausgabe nachbearbeiten",
         "speaker_embedding_only": "Nur Sprecher-Embedding",
         "clean_markdown": "Markdown bereinigen",
+        "normalize_spoken_text": "Sprechtext normalisieren",
+        "normalize_spoken_text_hint": "Entfernt nackte Links und schreibt einfache Daten, Uhrzeiten und Zahlen für die Aussprache aus.",
         "speed": "Geschwindigkeit",
         "duration": "Dauer (s, 0 = automatisch)",
         "ref_audio": "Referenzaudio (3-3.5s ideal, max 4s)",
