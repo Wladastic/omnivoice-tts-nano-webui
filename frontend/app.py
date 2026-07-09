@@ -639,7 +639,7 @@ def generate_voice(
         yield from _buffered_speech_json(payload, output_label)
 
 
-def list_voices():
+def list_voices(selected_voice=None):
     try:
         r = httpx.get(f"{API_URL}/voices", timeout=10)
         r.raise_for_status()
@@ -648,9 +648,15 @@ def list_voices():
             (f"{v['name']} ({t('audio_present') if v['has_audio'] else t('audio_missing')})", v["id"])
             for v in voices
         ]
-        return gr.update(choices=choices, value=choices[0][1] if choices else None)
+        voice_ids = [choice[1] for choice in choices]
+        value = selected_voice if selected_voice in voice_ids else (choices[0][1] if choices else None)
+        return gr.update(choices=choices, value=value)
     except Exception:
         return gr.update(choices=[], value=None)
+
+
+def clear_audio_output():
+    return None, t("streaming"), _empty_metrics()
 
 
 def list_outputs():
@@ -807,6 +813,11 @@ CTRL_ENTER_JS = """
         clone: ["clone-generate-btn", "clone-generate-top-btn"],
         design: ["design-generate-btn", "design-generate-top-btn"],
     };
+    const pasteButtonTargets = {
+        "voice-paste-btn": "voice-text",
+        "clone-paste-btn": "clone-text",
+        "design-paste-btn": "design-text",
+    };
     const cancelButtonIds = {
         voices: "voice-cancel-btn",
         clone: "clone-cancel-btn",
@@ -814,7 +825,6 @@ CTRL_ENTER_JS = """
     };
     const persistedFields = {
         "voice-text": "voiceText",
-        "voice-dropdown": "voiceDropdown",
         "voice-instruct": "voiceInstruct",
         "clone-text": "cloneText",
         "clone-ref-text": "cloneRefText",
@@ -883,8 +893,22 @@ CTRL_ENTER_JS = """
             try {
                 audio.pause();
                 audio.currentTime = 0;
+                audio.removeAttribute("src");
+                audio.load();
             } catch (_) {}
         });
+    };
+
+    const pasteIntoTextbox = async (targetId) => {
+        const input = editableIn(document.getElementById(targetId));
+        if (!input || !navigator.clipboard?.readText) {
+            return;
+        }
+        try {
+            const text = await navigator.clipboard.readText();
+            nativeSetValue(input, text);
+            input.focus();
+        } catch (_) {}
     };
 
     const clickButtonRoot = (id) => {
@@ -968,6 +992,21 @@ CTRL_ENTER_JS = """
         }
     };
 
+    const bindPasteButtons = () => {
+        for (const [buttonId, targetId] of Object.entries(pasteButtonTargets)) {
+            const root = document.getElementById(buttonId);
+            const button = root?.querySelector("button") || root;
+            if (!button || button.dataset.omniPasteBound === "true") {
+                continue;
+            }
+            button.dataset.omniPasteBound = "true";
+            button.addEventListener("click", (event) => {
+                event.preventDefault();
+                pasteIntoTextbox(targetId);
+            }, true);
+        }
+    };
+
     const bindTabButtons = () => {
         for (const button of allTabButtons()) {
             if (button.dataset.omniTabBound === "true") {
@@ -989,6 +1028,7 @@ CTRL_ENTER_JS = """
     const refreshBindings = () => {
         bindPersistedFields();
         bindGenerateButtons();
+        bindPasteButtons();
         bindTabButtons();
         activateInitialTab();
     };
@@ -1036,7 +1076,9 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft(), js=CTRL_ENTER_JS) as de
             with gr.Row():
                 with gr.Column():
                     clone_text = gr.Textbox(label=t("text"), lines=4, placeholder=t("text_placeholder"), elem_id="clone-text")
-                    clone_text_clear_btn = gr.Button(t("clear_text"), size="sm")
+                    with gr.Row():
+                        clone_text_paste_btn = gr.Button(t("paste_text"), size="sm", elem_id="clone-paste-btn")
+                        clone_text_clear_btn = gr.Button(t("clear_text"), size="sm")
                     clone_text_clear_btn.click(lambda: "", outputs=clone_text)
                     clone_lang = gr.Dropdown(LANGUAGES, value="Auto", label=t("language"))
                     clone_ref_audio = gr.Audio(
@@ -1108,11 +1150,19 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft(), js=CTRL_ENTER_JS) as de
                 clone_dynamic_desired_speed,
             ]
             clone_top_event = clone_btn_top.click(
+                clear_audio_output,
+                outputs=[clone_audio_out, clone_status, clone_metrics],
+                show_api=False,
+            ).then(
                 generate_clone,
                 inputs=clone_inputs,
                 outputs=[clone_audio_out, clone_status, clone_metrics],
             )
             clone_event = clone_btn.click(
+                clear_audio_output,
+                outputs=[clone_audio_out, clone_status, clone_metrics],
+                show_api=False,
+            ).then(
                 generate_clone,
                 inputs=clone_inputs,
                 outputs=[clone_audio_out, clone_status, clone_metrics],
@@ -1135,7 +1185,9 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft(), js=CTRL_ENTER_JS) as de
             with gr.Row():
                 with gr.Column():
                     design_text = gr.Textbox(label=t("text"), lines=4, placeholder=t("text_placeholder"), elem_id="design-text")
-                    design_text_clear_btn = gr.Button(t("clear_text"), size="sm")
+                    with gr.Row():
+                        design_text_paste_btn = gr.Button(t("paste_text"), size="sm", elem_id="design-paste-btn")
+                        design_text_clear_btn = gr.Button(t("clear_text"), size="sm")
                     design_text_clear_btn.click(lambda: "", outputs=design_text)
                     design_lang = gr.Dropdown(LANGUAGES, value="Auto", label=t("language"))
                     design_instruct = gr.Textbox(
@@ -1192,11 +1244,19 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft(), js=CTRL_ENTER_JS) as de
                 design_dynamic_desired_speed,
             ]
             design_top_event = design_btn_top.click(
+                clear_audio_output,
+                outputs=[design_audio_out, design_status, design_metrics],
+                show_api=False,
+            ).then(
                 generate_design,
                 inputs=design_inputs,
                 outputs=[design_audio_out, design_status, design_metrics],
             )
             design_event = design_btn.click(
+                clear_audio_output,
+                outputs=[design_audio_out, design_status, design_metrics],
+                show_api=False,
+            ).then(
                 generate_design,
                 inputs=design_inputs,
                 outputs=[design_audio_out, design_status, design_metrics],
@@ -1216,6 +1276,7 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft(), js=CTRL_ENTER_JS) as de
 
         # --- Saved Voices tab ---
         with gr.Tab(t("tab_voices"), id="voices", render_children=True):
+            voice_selected_state = gr.BrowserState(default_value="none", storage_key="omnivoice_selected_voice")
             with gr.Row():
                 with gr.Column():
                     voice_dropdown = gr.Dropdown(
@@ -1227,7 +1288,9 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft(), js=CTRL_ENTER_JS) as de
                     )
                     voices_refresh_btn = gr.Button(t("refresh_voices"))
                     voice_text = gr.Textbox(label=t("text"), lines=4, elem_id="voice-text")
-                    voice_text_clear_btn = gr.Button(t("clear_text"), size="sm")
+                    with gr.Row():
+                        voice_text_paste_btn = gr.Button(t("paste_text"), size="sm", elem_id="voice-paste-btn")
+                        voice_text_clear_btn = gr.Button(t("clear_text"), size="sm")
                     voice_text_clear_btn.click(lambda: "", outputs=voice_text)
                     voice_lang = gr.Dropdown(LANGUAGES, value="Auto", label=t("language"))
                     voice_instruct = gr.Textbox(label=t("instruct_optional"), lines=1, elem_id="voice-instruct")
@@ -1274,7 +1337,9 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft(), js=CTRL_ENTER_JS) as de
                     voice_status = gr.Textbox(label=t("status"), interactive=False)
                     voice_metrics = gr.HTML(label=t("metrics"))
 
-            voices_refresh_btn.click(list_voices, outputs=voice_dropdown)
+            voices_refresh_btn.click(list_voices, inputs=voice_selected_state, outputs=voice_dropdown)
+            demo.load(list_voices, inputs=voice_selected_state, outputs=voice_dropdown)
+            voice_dropdown.change(lambda voice_id: voice_id, inputs=voice_dropdown, outputs=voice_selected_state)
             voice_autoplay.change(set_audio_autoplay, inputs=voice_autoplay, outputs=voice_audio_out)
             voice_inputs = [
                 voice_dropdown, voice_text, voice_lang, voice_instruct,
@@ -1284,11 +1349,19 @@ with gr.Blocks(title=t("title"), theme=gr.themes.Soft(), js=CTRL_ENTER_JS) as de
                 voice_dynamic_desired_speed,
             ]
             voice_top_event = voice_btn_top.click(
+                clear_audio_output,
+                outputs=[voice_audio_out, voice_status, voice_metrics],
+                show_api=False,
+            ).then(
                 generate_voice,
                 inputs=voice_inputs,
                 outputs=[voice_audio_out, voice_status, voice_metrics],
             )
             voice_event = voice_btn.click(
+                clear_audio_output,
+                outputs=[voice_audio_out, voice_status, voice_metrics],
+                show_api=False,
+            ).then(
                 generate_voice,
                 inputs=voice_inputs,
                 outputs=[voice_audio_out, voice_status, voice_metrics],

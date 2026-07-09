@@ -27,6 +27,7 @@ TRANSLATIONS = {
         # Common
         "text": "Text",
         "text_placeholder": "Text to synthesize…",
+        "paste_text": "Paste",
         "clear_text": "Clear",
         "language": "Language",
         "synthesize": "Generate",
@@ -134,6 +135,7 @@ TRANSLATIONS = {
         "tab_history": "Verlauf",
         "text": "Text",
         "text_placeholder": "Zu synthetisierender Text…",
+        "paste_text": "Einfügen",
         "clear_text": "Leeren",
         "language": "Sprache",
         "synthesize": "Generieren",
