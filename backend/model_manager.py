@@ -111,17 +111,53 @@ def _quantize_llm_in_place(model):
     logger.info(f"LM quantization done — VRAM: {_vram_info()}")
 
 
+def _clear_tokenizer_cache():
+    # transformers wraps HiggsAudioV2TokenizerModel._get_conv1d_layers in a
+    # global @lru_cache that holds the tokenizer (~0.75 GB fp32) after unload.
+    try:
+        from transformers.models.higgs_audio_v2_tokenizer.modeling_higgs_audio_v2_tokenizer import (
+            HiggsAudioV2TokenizerModel,
+        )
+    except ImportError:
+        return
+    cached = getattr(HiggsAudioV2TokenizerModel._get_conv1d_layers, "cache_clear", None)
+    if cached:
+        cached()
+
+
+def _unload_locked():
+    """Drop the model and hand its VRAM back to the driver. Caller holds _lock."""
+    global _model
+    del _model
+    _model = None
+    _clear_tokenizer_cache()
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        # cuBLAS keeps an 8 MiB workspace from the caching allocator; it pins the whole segment it was cut from.
+        torch._C._cuda_clearCublasWorkspaces()
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+    logger.info(f"Unloaded — VRAM: {_vram_info()}")
+
+
+def unload() -> bool:
+    """Unload now (e.g. before another GPU user like ComfyUI). False if nothing was loaded."""
+    with _lock:
+        if _model is None:
+            return False
+        logger.info("Unload requested — unloading OmniVoice model")
+        _unload_locked()
+        return True
+
+
 def _unload_loop():
     while True:
         time.sleep(30)
         with _lock:
-            global _model, _last_used
             if _model is not None and (time.time() - _last_used) > MODEL_TTL_SECONDS:
                 logger.info("TTL expired — unloading OmniVoice model")
-                del _model
-                _model = None
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                _unload_locked()
 
 
 def _ensure_ttl_thread():
@@ -137,6 +173,15 @@ def _vram_info() -> str:
     allocated = torch.cuda.memory_allocated() / 1024**3
     reserved = torch.cuda.memory_reserved() / 1024**3
     return f"allocated={allocated:.2f}GB reserved={reserved:.2f}GB"
+
+
+def vram_mb() -> dict:
+    if not torch.cuda.is_available():
+        return {}
+    return {
+        "allocated_mb": round(torch.cuda.memory_allocated() / 1024**2),
+        "reserved_mb": round(torch.cuda.memory_reserved() / 1024**2),
+    }
 
 
 def reset_peak_vram():
