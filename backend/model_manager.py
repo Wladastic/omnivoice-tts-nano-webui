@@ -142,13 +142,16 @@ def _unload_locked():
 
 
 def unload() -> bool:
-    """Unload now (e.g. before another GPU user like ComfyUI). False if nothing was loaded."""
+    """Unload now (e.g. before another GPU user like ComfyUI). False if nothing was loaded.
+
+    Frees the caches even then: a generation still running when the model was dropped
+    releases its tensors only when it ends, so a second call returns that VRAM too.
+    """
     with _lock:
-        if _model is None:
-            return False
-        logger.info("Unload requested — unloading OmniVoice model")
+        loaded = _model is not None
+        logger.info("Unload requested — model %s", "loaded" if loaded else "already unloaded")
         _unload_locked()
-        return True
+        return loaded
 
 
 def _unload_loop():
